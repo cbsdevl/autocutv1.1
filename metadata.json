@@ -1,0 +1,6 @@
+{
+  "name": "AutoCut AI",
+  "description": "Professional AI-powered automatic video editor with copyright safety, smart timeline editing, captions, and YouTube export.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
