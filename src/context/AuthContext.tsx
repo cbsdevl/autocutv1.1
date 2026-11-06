@@ -103,7 +103,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         return true;
       }
-      setError(data.error || "Login failed");
+      setError(data.message || data.error || "Login failed");
       return false;
     } catch {
       setError("Network error. Please check your connection.");

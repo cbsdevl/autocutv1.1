@@ -16,7 +16,6 @@ import {
   getUserByEmail,
   getUserByGoogleId,
   getUserById,
-  getFirstAdminUser,
   getUserWithSubscription,
   getAllUsers,
   createUser,
@@ -180,6 +179,37 @@ function getAuthToken(req: Request): string | null {
   return null;
 }
 
+function isDatabaseUnavailable(error: unknown): boolean {
+  const pending: unknown[] = [error];
+  const visited = new Set<object>();
+  const connectionErrorCodes = new Set([
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "ETIMEDOUT",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "ENOTFOUND",
+    "57P01",
+    "08000",
+    "08001",
+    "08003",
+    "08006",
+  ]);
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+
+    const details = current as { code?: unknown; cause?: unknown; errors?: unknown };
+    if (typeof details.code === "string" && connectionErrorCodes.has(details.code)) return true;
+    if (details.cause) pending.push(details.cause);
+    if (Array.isArray(details.errors)) pending.push(...details.errors);
+  }
+
+  return false;
+}
+
 // Express augmentation for typed req.user
 declare global {
   namespace Express {
@@ -211,23 +241,20 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
       });
     }
 
-    // Graceful fallback for iframe environments where third-party cookies or headers might be partitioned:
-    const fallbackUser = await getFirstAdminUser();
-    if (fallbackUser) {
-      const user = await getUserWithSubscription(fallbackUser.id);
-      if (user) {
-        (req as any).user = user;
-        return next();
-      }
-    }
-
-    res.status(401).json({
+    return res.status(401).json({
       error: "unauthorized",
       message: "You must be signed in to perform this action. Please sign in or register.",
     });
   } catch (err) {
     console.error("[requireAuth] Error:", err);
-    res.status(401).json({ error: "Unauthorized" });
+    if (isDatabaseUnavailable(err)) {
+      res.setHeader("Retry-After", "10");
+      return res.status(503).json({
+        error: "service_unavailable",
+        message: "Authentication is temporarily unavailable because the database cannot be reached.",
+      });
+    }
+    return res.status(500).json({ error: "Authentication could not be completed." });
   }
 }
 
@@ -542,6 +569,15 @@ app.post("/api/auth/login", async (req: Request, res: Response) => {
     res.cookie(COOKIE_NAME, token, COOKIE_OPTIONS);
     res.json({ user: sanitizeUser(user!), token });
   } catch (err) {
+    if (isDatabaseUnavailable(err)) {
+      console.warn("[Auth] Login unavailable: database connection failed.");
+      res.setHeader("Retry-After", "10");
+      res.status(503).json({
+        error: "service_unavailable",
+        message: "Sign-in is temporarily unavailable because the database cannot be reached.",
+      });
+      return;
+    }
     console.error("[Auth] Login error:", err);
     res.status(500).json({ error: "Login failed." });
   }

@@ -12,6 +12,16 @@ import {
   getCanvasDimensions,
   renderOfflineAudioMix,
 } from "./renderEngine";
+import {
+  AudioBufferSource,
+  BufferTarget,
+  CanvasSource,
+  Mp4OutputFormat,
+  Output,
+  WebMOutputFormat,
+  canEncodeAudio,
+  canEncodeVideo,
+} from "mediabunny";
 
 export interface FastRenderOptions {
   project: ProjectSettings;
@@ -117,7 +127,7 @@ function resolveClipMedia(
 
 /**
  * Ultra-Fast Direct Client-Side Render Engine (CapCut & Clipchamp Architecture):
- * - 100% in-browser GPU hardware acceleration via Canvas 2D + MediaRecorder.
+ * - Timestamped WebCodecs encoding with hardware acceleration when available.
  * - Frame-accurate video seeking and synchronization with exact trims, speeds, and cuts.
  * - Hardware Audio Mixer via OfflineAudioContext (synthesizes studio 48kHz audio in ~150ms).
  * - Multi-track compositor: V1 Base Footage, V2 B-roll Overlays, T1 Motion Titles, Subtitles.
@@ -305,54 +315,112 @@ export async function renderTimelineFastDirect(
   ctx.fillStyle = "#000000";
   ctx.fillRect(0, 0, width, height);
 
-  // 4. Setup MediaStream and Audio Destination
-  const canvasStream = canvas.captureStream(fps);
+  // 4. Prefer timestamped WebCodecs encoding so export is not paced by real-time capture.
+  const canUseWebCodecs = typeof VideoEncoder !== "undefined" && typeof AudioEncoder !== "undefined";
+  let output: Output | null = null;
+  let outputTarget: BufferTarget | null = null;
+  let videoSource: CanvasSource | null = null;
+  let audioBufferSource: AudioBufferSource | null = null;
+  let selectedMime: string;
+  let selectedExt: string;
+
+  if (canUseWebCodecs) {
+    const videoCodec = requestedFormat === "mp4" ? "avc" : "vp8";
+    const audioCodec = requestedFormat === "mp4" ? "aac" : "opus";
+    const videoSupported = await canEncodeVideo(videoCodec, {
+      width,
+      height,
+      bitrate: videoBitsPerSecond,
+      frameRate: fps,
+      hardwareAcceleration: "prefer-hardware",
+    });
+    const audioSupported =
+      !audioBuffer ||
+      (await canEncodeAudio(audioCodec, {
+        numberOfChannels: audioBuffer.numberOfChannels,
+        sampleRate: audioBuffer.sampleRate,
+        bitrate: 192_000,
+      }));
+
+    if (videoSupported && audioSupported) {
+      outputTarget = new BufferTarget();
+      const format =
+        requestedFormat === "mp4"
+          ? new Mp4OutputFormat({ fastStart: false })
+          : new WebMOutputFormat();
+      output = new Output({ format, target: outputTarget });
+      selectedMime = requestedFormat === "mp4" ? "video/mp4" : "video/webm";
+      selectedExt = requestedFormat;
+      videoSource = new CanvasSource(canvas, {
+        codec: videoCodec,
+        bitrate: videoBitsPerSecond,
+        hardwareAcceleration: "prefer-hardware",
+      });
+      output.addVideoTrack(videoSource, { frameRate: fps });
+      if (audioBuffer) {
+        audioBufferSource = new AudioBufferSource(
+          {
+            codec: audioCodec,
+            bitrate: 192_000,
+          },
+          { startTimestamp: 0 }
+        );
+        output.addAudioTrack(audioBufferSource);
+      }
+      await output.start();
+    }
+  }
+
+  // 5. Retain MediaRecorder for browsers or codecs without WebCodecs support.
+  let canvasStream: MediaStream | null = null;
   let audioDestinationNode: MediaStreamAudioDestinationNode | null = null;
   let audioSourceNode: AudioBufferSourceNode | null = null;
   let activeAudioCtx: AudioContext | null = null;
-
-  if (audioBuffer && AudioCtxClass) {
-    try {
-      activeAudioCtx = new AudioCtxClass();
-      audioDestinationNode = activeAudioCtx.createMediaStreamDestination();
-      audioSourceNode = activeAudioCtx.createBufferSource();
-      audioSourceNode.buffer = audioBuffer;
-      audioSourceNode.connect(audioDestinationNode);
-
-      const audioTracks = audioDestinationNode.stream.getAudioTracks();
-      if (audioTracks.length > 0) {
-        canvasStream.addTrack(audioTracks[0]);
-      }
-    } catch (e) {
-      console.warn("[FastEngine] Audio track attachment notice:", e);
-    }
-  }
-
-  // 5. Initialize MediaRecorder with hardware encoder
-  const { mimeType: selectedMime, extension: selectedExt } = getSupportedMimeType(requestedFormat);
   const recordedChunks: Blob[] = [];
+  let recorder: MediaRecorder | null = null;
 
-  let recorder: MediaRecorder;
-  try {
-    recorder = new MediaRecorder(canvasStream, {
-      mimeType: selectedMime,
-      videoBitsPerSecond,
-    });
-  } catch {
-    recorder = new MediaRecorder(canvasStream);
-  }
+  if (!output) {
+    canvasStream = canvas.captureStream(fps);
+    if (audioBuffer && AudioCtxClass) {
+      try {
+        activeAudioCtx = new AudioCtxClass();
+        audioDestinationNode = activeAudioCtx.createMediaStreamDestination();
+        audioSourceNode = activeAudioCtx.createBufferSource();
+        audioSourceNode.buffer = audioBuffer;
+        audioSourceNode.connect(audioDestinationNode);
 
-  recorder.ondataavailable = (e) => {
-    if (e.data && e.data.size > 0) {
-      recordedChunks.push(e.data);
+        const audioTracks = audioDestinationNode.stream.getAudioTracks();
+        if (audioTracks.length > 0) {
+          canvasStream.addTrack(audioTracks[0]);
+        }
+      } catch (e) {
+        console.warn("[FastEngine] Audio track attachment notice:", e);
+      }
     }
-  };
-
-  recorder.start(100);
-  if (audioSourceNode) {
+    const selection = getSupportedMimeType(requestedFormat);
+    selectedMime = selection.mimeType;
+    selectedExt = selection.extension;
     try {
-      audioSourceNode.start(0);
-    } catch {}
+      recorder = new MediaRecorder(canvasStream, {
+        mimeType: selectedMime,
+        videoBitsPerSecond,
+      });
+    } catch {
+      recorder = new MediaRecorder(canvasStream);
+      selectedMime = recorder.mimeType || "video/webm";
+      selectedExt = selectedMime.includes("mp4") ? "mp4" : "webm";
+    }
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        recordedChunks.push(e.data);
+      }
+    };
+    recorder.start(100);
+    if (audioSourceNode) {
+      try {
+        audioSourceNode.start(0);
+      } catch {}
+    }
   }
 
   const v1Track = tracks.find((t) => t.type === "V1" && t.visible);
@@ -388,7 +456,9 @@ export async function renderTimelineFastDirect(
       abortSignal.addEventListener("abort", () => {
         aborted = true;
         cleanup();
-        if (recorder.state !== "inactive") {
+        if (output) {
+          void output.cancel();
+        } else if (recorder && recorder.state !== "inactive") {
           try {
             recorder.stop();
           } catch {}
@@ -462,8 +532,12 @@ export async function renderTimelineFastDirect(
           drawSubtitleText(ctx, activeCap, width, height);
         }
 
-        // Yield slightly every 4 frames to keep browser responsive
-        if (frameIdx % 4 === 0) {
+        if (videoSource) {
+          await videoSource.add(currentTime, totalDuration / totalFrames);
+        }
+
+        // Timestamped encoding applies backpressure; only the MediaRecorder fallback needs periodic yielding.
+        if (!videoSource && frameIdx % 4 === 0) {
           await new Promise((r) => setTimeout(r, 0));
         }
       }
@@ -478,31 +552,42 @@ export async function renderTimelineFastDirect(
         status: requestedFormat === "mp4" ? "Finalizing broadcast MP4 (H.264 & AAC)..." : "Finalizing WebM container...",
       });
 
-      // Stop recorder with guaranteed timeout so it NEVER hangs/stacks on finalization
-      const recordedBlob = await new Promise<Blob>((resBlob) => {
-        let finished = false;
-        const finish = () => {
-          if (!finished) {
-            finished = true;
-            resBlob(new Blob(recordedChunks, { type: selectedMime }));
-          }
-        };
+      let recordedBlob: Blob;
+      if (output && outputTarget) {
+        if (audioBufferSource && audioBuffer) {
+          await audioBufferSource.add(audioBuffer);
+        }
+        await output.finalize();
+        if (!outputTarget.buffer) {
+          throw new Error("WebCodecs export completed without producing a video file.");
+        }
+        recordedBlob = new Blob([outputTarget.buffer], { type: selectedMime });
+      } else if (recorder) {
+        // Stop recorder with guaranteed timeout so it NEVER hangs on finalization.
+        recordedBlob = await new Promise<Blob>((resBlob) => {
+          let finished = false;
+          const finish = () => {
+            if (!finished) {
+              finished = true;
+              resBlob(new Blob(recordedChunks, { type: selectedMime }));
+            }
+          };
 
-        recorder.onstop = finish;
-
-        try {
-          if (recorder.state !== "inactive") {
-            recorder.stop();
-          } else {
+          recorder!.onstop = finish;
+          try {
+            if (recorder!.state !== "inactive") {
+              recorder!.stop();
+            } else {
+              finish();
+            }
+          } catch {
             finish();
           }
-        } catch {
-          finish();
-        }
-
-        // Hard timeout fallback: guarantee finalization resolves within 2 seconds
-        setTimeout(finish, 2000);
-      });
+          setTimeout(finish, 2000);
+        });
+      } else {
+        throw new Error("No supported video encoder is available in this browser.");
+      }
 
       cleanup();
 
