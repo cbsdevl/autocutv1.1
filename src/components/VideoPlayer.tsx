@@ -73,6 +73,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const getPlaybackUrl = useCallback((media: MediaItem | null): string | null => {
     if (!media) return null;
+    if (media.proxyUrl) return media.proxyUrl;
     if (media.file) {
       if (media.blobUrl && media.blobUrl.startsWith("blob:")) return media.blobUrl;
       if (media.url.startsWith("blob:")) return media.url;
@@ -573,7 +574,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
               {overlayMedia.type === "video" ? (
                 <video
                   ref={overlayVideoRef}
-                  src={overlayMedia.url}
+                  src={overlayMedia.proxyUrl || overlayMedia.url}
                   playsInline
                   autoPlay={isPlaying}
                   muted

@@ -43,6 +43,7 @@ import {
   generateChapterMarkersText,
 } from "./utils/mediaUtils";
 import { renderTimelineToVideo } from "./utils/renderEngine";
+import { createVideoProxy } from "./utils/videoProxy";
 import {
   deleteProjectForUser,
   downloadProjectArchive,
@@ -74,6 +75,9 @@ export default function App() {
 
   // Media Library Assets State - completely empty initial state (no demo data)
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
+  const mediaItemsRef = useRef<MediaItem[]>([]);
+  const proxyJobsRef = useRef(new Map<string, AbortController>());
+  const proxyUrlsRef = useRef(new Set<string>());
 
   // Timeline Tracks State - all tracks empty with no demo clips
   const [tracks, setTracks] = useState<TimelineTrack[]>(() => {
@@ -141,6 +145,79 @@ export default function App() {
   const [projectHydrated, setProjectHydrated] = useState(false);
   const [projectNotice, setProjectNotice] = useState<string | null>(null);
   const storageUserId = currentUser?.id ?? 0;
+
+  useEffect(() => {
+    mediaItemsRef.current = mediaItems;
+    for (const [id, controller] of proxyJobsRef.current) {
+      if (!mediaItems.some((item) => item.id === id)) controller.abort();
+    }
+    const currentProxyUrls = new Set(
+      mediaItems.map((item) => item.proxyUrl).filter((url): url is string => Boolean(url)),
+    );
+    for (const url of proxyUrlsRef.current) {
+      if (!currentProxyUrls.has(url)) URL.revokeObjectURL(url);
+    }
+    proxyUrlsRef.current = currentProxyUrls;
+
+    for (const item of mediaItems) {
+      if (
+        item.type !== "video" ||
+        !item.file ||
+        item.proxyUrl ||
+        item.proxyStatus === "failed" ||
+        proxyJobsRef.current.has(item.id)
+      ) {
+        continue;
+      }
+
+      const controller = new AbortController();
+      proxyJobsRef.current.set(item.id, controller);
+      setMediaItems((items) =>
+        items.map((current) =>
+          current.id === item.id ? { ...current, proxyStatus: "processing", proxyError: undefined } : current,
+        ),
+      );
+
+      void createVideoProxy(item.file, controller.signal)
+        .then((proxy) => {
+          if (controller.signal.aborted || !mediaItemsRef.current.some((current) => current.id === item.id)) return;
+          const proxyUrl = URL.createObjectURL(proxy);
+          proxyUrlsRef.current.add(proxyUrl);
+          setMediaItems((items) =>
+            items.map((current) =>
+              current.id === item.id
+                ? { ...current, proxyUrl, proxyStatus: "ready", proxyError: undefined }
+                : current,
+            ),
+          );
+        })
+        .catch((error: unknown) => {
+          if (controller.signal.aborted) return;
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[VideoProxy] Could not prepare "${item.name}"; using the original video.`, error);
+          setMediaItems((items) =>
+            items.map((current) =>
+              current.id === item.id
+                ? { ...current, proxyStatus: "failed", proxyError: message }
+                : current,
+            ),
+          );
+        })
+        .finally(() => {
+          if (proxyJobsRef.current.get(item.id) === controller) proxyJobsRef.current.delete(item.id);
+        });
+    }
+  }, [mediaItems]);
+
+  useEffect(
+    () => () => {
+      for (const controller of proxyJobsRef.current.values()) controller.abort();
+      proxyJobsRef.current.clear();
+      for (const url of proxyUrlsRef.current) URL.revokeObjectURL(url);
+      proxyUrlsRef.current.clear();
+    },
+    [],
+  );
 
   // AI Operation States
   const [isAutoEditing, setIsAutoEditing] = useState<boolean>(false);

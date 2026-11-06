@@ -11,9 +11,7 @@ import {
   findMediaItem,
   getCanvasDimensions,
   renderOfflineAudioMix,
-  createSharedFrameStream,
 } from "./renderEngine";
-import { renderUploadedVideoWithFFmpegWasm } from "./ffmpegWasmRenderEngine";
 
 export interface FastRenderOptions {
   project: ProjectSettings;
@@ -400,9 +398,6 @@ export async function renderTimelineFastDirect(
     }
 
     try {
-      // Pre-allocate SharedArrayBuffer for streaming frame data without memory-intensive file writes
-      const sharedFrameStream = createSharedFrameStream(width, height);
-
       // 6. Frame-accurate timeline composition loop
       for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
         if (aborted) return;
@@ -466,12 +461,6 @@ export async function renderTimelineFastDirect(
         if (activeCap && activeCap.text) {
           drawSubtitleText(ctx, activeCap, width, height);
         }
-
-        // Stream frame data directly into the SharedArrayBuffer without memory-intensive file writes
-        try {
-          const imgData = ctx.getImageData(0, 0, width, height);
-          sharedFrameStream.pixels.set(imgData.data);
-        } catch {}
 
         // Yield slightly every 4 frames to keep browser responsive
         if (frameIdx % 4 === 0) {
@@ -567,45 +556,11 @@ export async function renderTimelineFastDirect(
           console.warn("[FastEngine] Local server remux notice or timeout:", remuxErr);
         }
 
-        // Strategy B: Client-Side FFmpeg.wasm Transcode with 5s timeout
+        // Preserve the actual recorder format when server-side MP4 conversion is unavailable.
         if (!remuxSucceeded) {
-          try {
-            const wasmPromise = renderUploadedVideoWithFFmpegWasm(
-              recordedBlob,
-              safeFileName,
-              (pct) => {
-                const mapped = Math.min(99, Math.max(95, 95 + Math.round((pct / 100) * 4)));
-                onProgress({
-                  isRendering: true,
-                  percent: mapped,
-                  progress: mapped,
-                  currentSecond: totalDuration,
-                  totalSeconds: totalDuration,
-                  stage: "finalizing",
-                  status: `Finalizing genuine MP4 (${pct}%)...`,
-                });
-              }
-            );
-
-            const timeoutPromise = new Promise<null>((r) => setTimeout(() => r(null), 5000));
-            const wasmRes = await Promise.race([wasmPromise, timeoutPromise]);
-
-            if (wasmRes && wasmRes.blob && wasmRes.blob.size > 1000) {
-              finalBlob = wasmRes.blob;
-              finalExt = "mp4";
-              finalMime = "video/mp4";
-              remuxSucceeded = true;
-            }
-          } catch (wasmErr) {
-            console.warn("[FastEngine] FFmpeg WASM transcode notice:", wasmErr);
-          }
-        }
-
-        // Guaranteed resolution fallback: ensure user gets playable MP4 and never stacks
-        if (!remuxSucceeded) {
-          finalBlob = new Blob([recordedBlob], { type: "video/mp4" });
-          finalExt = "mp4";
-          finalMime = "video/mp4";
+          finalBlob = recordedBlob;
+          finalExt = selectedExt;
+          finalMime = recordedBlob.type || selectedMime;
         }
       }
 

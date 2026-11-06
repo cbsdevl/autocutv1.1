@@ -22,7 +22,7 @@ export interface ProjectSnapshot {
   auditReport: CopyrightAuditReport | null;
 }
 
-interface StoredMedia extends Omit<MediaItem, "url" | "blobUrl" | "file"> {
+interface StoredMedia extends Omit<MediaItem, "url" | "blobUrl" | "file" | "proxyUrl" | "proxyStatus" | "proxyError"> {
   assetPath?: string;
   assetName?: string;
   assetType?: string;
@@ -78,7 +78,7 @@ function openDatabase(): Promise<IDBDatabase> {
 // ─────────────────────────────────────────
 
 function withoutRuntimeMediaFields(item: MediaItem): StoredMedia {
-  const { url, blobUrl, file, ...metadata } = item;
+  const { url, blobUrl, file, proxyUrl, proxyStatus, proxyError, ...metadata } = item;
   // Only persist thumbnail if it is a data: URI (not a blob: URL which expires)
   const storedThumbnail = metadata.thumbnail?.startsWith("blob:") ? undefined : metadata.thumbnail;
   return {

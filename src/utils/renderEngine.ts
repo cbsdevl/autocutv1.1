@@ -15,7 +15,6 @@ import {
 } from "./audioSynth";
 import { renderTimelineWithCloudEngine } from "./cloudRenderPipeline";
 import { renderTimelineWithGoogleEngine } from "./googleRenderEngine";
-import { renderTimelineWithFFmpegWasm } from "./ffmpegWasmRenderEngine";
 import { renderTimelineFastDirect } from "./directFastRenderEngine";
 
 export type { RenderProgress, ExportSettings };
@@ -437,49 +436,8 @@ export async function renderTimelineWithFFmpegServer(
 }
 
 /**
- * SharedArrayBuffer Zero-Copy Frame Stream:
- * Reuses a single pre-allocated shared buffer across the entire render loop,
- * eliminating garbage-collected allocations and memory-intensive virtual file writes.
- */
-export interface SharedFrameStream {
-  buffer: SharedArrayBuffer | ArrayBuffer;
-  pixels: Uint8ClampedArray;
-  bytes: Uint8Array;
-  width: number;
-  height: number;
-  byteLength: number;
-  isShared: boolean;
-}
-
-export function createSharedFrameStream(width: number, height: number): SharedFrameStream {
-  const byteLength = width * height * 4;
-  const isShared =
-    typeof window !== "undefined" &&
-    window.crossOriginIsolated === true &&
-    typeof SharedArrayBuffer !== "undefined";
-
-  const buffer = isShared
-    ? new SharedArrayBuffer(byteLength)
-    : new ArrayBuffer(byteLength);
-
-  return {
-    buffer,
-    pixels: new Uint8ClampedArray(buffer),
-    bytes: new Uint8Array(buffer),
-    width,
-    height,
-    byteLength,
-    isShared,
-  };
-}
-
-/**
  * Main render entry-point:
- * Uses high-speed SharedArrayBuffer streaming video frame data directly into the FFmpeg virtual file system:
- *  - 100% In-browser GPU hardware compute on user's device.
- *  - Zero-copy SharedArrayBuffer streaming: avoids memory-intensive file writes during the render loop.
- *  - Non-blocking finalization: strict timeout guards ensure the MP4 finalization never hangs or stacks.
- *  - Smooth monotonic progress (0% -> 100%). Strictly non-looping.
+ * Uses the browser-native renderer. Source files stay available for full-resolution export.
  */
 export async function renderTimelineToVideo(
   options: RenderTimelineOptions
@@ -491,22 +449,9 @@ export async function renderTimelineToVideo(
     currentSecond: 0,
     totalSeconds: options.totalDuration,
     stage: "preparing",
-    status: "Initializing SharedArrayBuffer streaming video render pipeline...",
+    status: "Preparing browser-native video render pipeline...",
   });
-
-  try {
-    return await renderTimelineFastDirect(options);
-  } catch (err: any) {
-    if (
-      options.abortSignal?.aborted ||
-      err?.message?.includes("aborted") ||
-      err?.message?.includes("canceled")
-    ) {
-      throw err;
-    }
-    console.warn("Direct fast engine notice, running FFmpeg WASM stream engine:", err);
-    return await renderTimelineWithFFmpegWasm(options);
-  }
+  return renderTimelineFastDirect(options);
 }
 
 export async function renderProjectVideo(
@@ -548,19 +493,7 @@ export async function renderProjectVideo(
     onProgress,
   };
 
-  try {
-    return await renderTimelineFastDirect(renderOptions);
-  } catch (err: any) {
-    if (
-      abortSignal?.aborted ||
-      err?.message?.includes("aborted") ||
-      err?.message?.includes("canceled")
-    ) {
-      throw err;
-    }
-    console.warn("Direct fast engine notice, running FFmpeg WASM stream engine:", err);
-    return await renderTimelineWithFFmpegWasm(renderOptions);
-  }
+  return renderTimelineFastDirect(renderOptions);
 }
 
 function formatSeconds(sec: number): string {

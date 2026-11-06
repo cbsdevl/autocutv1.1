@@ -94,6 +94,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     100,
     Math.max(0, Math.round(renderProgress?.progress || renderProgress?.percent || 0))
   );
+  const downloadFileName =
+    renderProgress?.format === "WEBM" && /\.mp4$/i.test(outputFileName)
+      ? outputFileName.replace(/\.mp4$/i, ".webm")
+      : outputFileName;
 
   const handleFormatChange = (newFormat: "mp4" | "webm") => {
     setFormat(newFormat);
@@ -253,7 +257,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
                 <a
                   href={renderProgress?.downloadUrl}
-                  download={outputFileName}
+                  download={downloadFileName}
                   className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-bold text-xs transition shadow-lg shadow-amber-500/20 cursor-pointer min-h-[42px] flex items-center justify-center gap-2"
                 >
                   <Download className="w-4 h-4 stroke-[2.5]" />

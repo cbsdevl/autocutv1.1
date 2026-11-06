@@ -76,6 +76,9 @@ export interface MediaItem {
   url: string; // Object URL or static URL
   blobUrl?: string;
   file?: File;
+  proxyUrl?: string;
+  proxyStatus?: "processing" | "ready" | "failed";
+  proxyError?: string;
   sourcePath?: string; // Original storage/file path when one was provided by the app or DB
   duration: number; // in seconds
   width: number;

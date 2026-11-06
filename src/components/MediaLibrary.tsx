@@ -429,6 +429,22 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
                       </span>
                     )}
                     <span>• {formatBytes(item.size)}</span>
+                    {item.proxyStatus === "processing" && (
+                      <span className="text-sky-400">Preparing proxy…</span>
+                    )}
+                    {item.proxyStatus === "ready" && (
+                      <span className="text-emerald-400" title="Timeline preview uses a low-resolution proxy">
+                        Proxy ready
+                      </span>
+                    )}
+                    {item.proxyStatus === "failed" && (
+                      <span
+                        className="text-amber-400"
+                        title={item.proxyError || "Using the original video"}
+                      >
+                        Original preview
+                      </span>
+                    )}
                   </div>
 
                   {/* Copyright status pill */}
@@ -496,7 +512,7 @@ export const MediaLibrary: React.FC<MediaLibraryProps> = ({
             <div className="p-4 bg-black flex items-center justify-center min-h-[240px]">
               {previewItem.type === "video" ? (
                 <video
-                  src={previewItem.url}
+                  src={previewItem.proxyUrl || previewItem.url}
                   controls
                   autoPlay
                   className="max-h-[300px] w-auto rounded"
