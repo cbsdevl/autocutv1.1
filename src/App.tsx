@@ -42,7 +42,7 @@ import {
   formatTimecode,
   generateChapterMarkersText,
 } from "./utils/mediaUtils";
-import { renderTimelineToVideo } from "./utils/renderEngine";
+import { getTimelineDuration, renderTimelineToVideo } from "./utils/renderEngine";
 import { createVideoProxy } from "./utils/videoProxy";
 import {
   deleteProjectForUser,
@@ -335,14 +335,7 @@ export default function App() {
 
   // Calculate total duration across all tracks
   const totalDuration = useMemo(() => {
-    let maxTime = 0;
-    tracks.forEach((track) => {
-      track.clips.forEach((clip) => {
-        const end = clip.startTime + clip.duration;
-        if (end > maxTime) maxTime = end;
-      });
-    });
-    return maxTime > 0 ? maxTime : 15;
+    return getTimelineDuration(tracks) || 15;
   }, [tracks]);
 
   // Push state to Undo History

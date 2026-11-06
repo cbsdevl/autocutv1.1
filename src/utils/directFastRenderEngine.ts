@@ -10,18 +10,28 @@ import {
 import {
   findMediaItem,
   getCanvasDimensions,
+  getTimelineDuration,
   renderOfflineAudioMix,
 } from "./renderEngine";
 import {
   AudioBufferSource,
+  BlobSource,
   BufferTarget,
+  CanvasSink,
   CanvasSource,
+  Input,
+  MATROSKA,
+  MP4,
   Mp4OutputFormat,
   Output,
+  QTFF,
+  WEBM,
   WebMOutputFormat,
   canEncodeAudio,
   canEncodeVideo,
 } from "mediabunny";
+
+const VIDEO_INPUT_FORMATS = [MP4, QTFF, WEBM, MATROSKA];
 
 export interface FastRenderOptions {
   project: ProjectSettings;
@@ -79,25 +89,32 @@ function getSupportedMimeType(requestedFormat: "mp4" | "webm"): { mimeType: stri
 function resolveClipMedia(
   clip: TimelineClip,
   videoMap: Map<string, HTMLVideoElement>,
+  decodedVideoMap: Map<string, { sink: CanvasSink; timestampOffset: number }>,
   imageMap: Map<string, HTMLImageElement>,
   mediaItems: MediaItem[]
-): { video?: HTMLVideoElement; image?: HTMLImageElement } {
+): { video?: HTMLVideoElement; decodedVideo?: { sink: CanvasSink; timestampOffset: number }; image?: HTMLImageElement } {
   // 1. Direct key match
+  if (decodedVideoMap.has(clip.mediaId)) return { decodedVideo: decodedVideoMap.get(clip.mediaId) };
   if (videoMap.has(clip.mediaId)) return { video: videoMap.get(clip.mediaId) };
   if (imageMap.has(clip.mediaId)) return { image: imageMap.get(clip.mediaId) };
 
   // 2. Normalized aliases (_vid_ <-> _video_)
   const norm1 = clip.mediaId.replace(/_vid_/, "_video_").replace(/_aud_/, "_audio_");
+  if (decodedVideoMap.has(norm1)) return { decodedVideo: decodedVideoMap.get(norm1) };
   if (videoMap.has(norm1)) return { video: videoMap.get(norm1) };
   if (imageMap.has(norm1)) return { image: imageMap.get(norm1) };
 
   const norm2 = clip.mediaId.replace(/_video_/, "_vid_").replace(/_audio_/, "_aud_");
+  if (decodedVideoMap.has(norm2)) return { decodedVideo: decodedVideoMap.get(norm2) };
   if (videoMap.has(norm2)) return { video: videoMap.get(norm2) };
   if (imageMap.has(norm2)) return { image: imageMap.get(norm2) };
 
   // 3. Match by label or item name
   if (clip.label) {
     const cleanLabel = clip.label.trim().toLowerCase();
+    for (const [key, decodedVideo] of decodedVideoMap.entries()) {
+      if (key.trim().toLowerCase() === cleanLabel) return { decodedVideo };
+    }
     for (const [key, v] of videoMap.entries()) {
       if (key.trim().toLowerCase() === cleanLabel) return { video: v };
     }
@@ -112,14 +129,10 @@ function resolveClipMedia(
     mediaItems.find((m) => m.name.trim().toLowerCase() === clip.label?.trim().toLowerCase());
 
   if (foundItem) {
+    if (decodedVideoMap.has(foundItem.id)) return { decodedVideo: decodedVideoMap.get(foundItem.id) };
     if (videoMap.has(foundItem.id)) return { video: videoMap.get(foundItem.id) };
     if (imageMap.has(foundItem.id)) return { image: imageMap.get(foundItem.id) };
     if (foundItem.name && videoMap.has(foundItem.name)) return { video: videoMap.get(foundItem.name) };
-  }
-
-  // 5. Fallback: first available video if any
-  if (videoMap.size > 0) {
-    return { video: Array.from(videoMap.values())[0] };
   }
 
   return {};
@@ -145,16 +158,11 @@ export async function renderTimelineFastDirect(
 
   const requestedFormat: "mp4" | "webm" = exportSettings?.format === "webm" ? "webm" : "mp4";
 
-  // Calculate actual timeline duration
-  let calculatedDuration = 0;
-  tracks.forEach((t) => {
-    t.clips.forEach((c) => {
-      const end = c.startTime + c.duration;
-      if (end > calculatedDuration) calculatedDuration = end;
-    });
-  });
-
-  const totalDuration = Math.max(calculatedDuration, options.totalDuration, 3);
+  const calculatedDuration = getTimelineDuration(tracks);
+  if (calculatedDuration <= 0) {
+    throw new Error("The visible timeline has no clips to export.");
+  }
+  const totalDuration = calculatedDuration;
   const resolution = exportSettings?.resolution || project.resolution || "1080p";
   const { width, height } = getCanvasDimensions(project.aspectRatio, resolution);
   const fps = exportSettings?.frameRate || project.frameRate || 30;
@@ -222,12 +230,33 @@ export async function renderTimelineFastDirect(
   document.body.appendChild(stage);
 
   const videoMap = new Map<string, HTMLVideoElement>();
+  const decodedVideoMap = new Map<string, { sink: CanvasSink; timestampOffset: number }>();
+  const decoderInputs: Input[] = [];
   const imageMap = new Map<string, HTMLImageElement>();
   const createdObjectUrls: string[] = [];
+  const activeVideoAndImageItems = new Map<string, MediaItem>();
+  tracks
+    .filter((track) => track.visible && (track.type === "V1" || track.type === "V2"))
+    .flatMap((track) => track.clips)
+    .forEach((clip) => {
+      const item =
+        findMediaItem(mediaItems, clip.mediaId) ||
+        mediaItems.find((media) => media.name.trim().toLowerCase() === clip.label?.trim().toLowerCase());
+      if (item && (item.type === "video" || item.type === "image")) {
+        activeVideoAndImageItems.set(item.id, item);
+      }
+    });
+
+  const addMediaAliases = <T,>(map: Map<string, T>, item: MediaItem, value: T) => {
+    map.set(item.id, value);
+    if (item.name) map.set(item.name, value);
+    map.set(item.id.replace(/_vid_/, "_video_"), value);
+    map.set(item.id.replace(/_video_/, "_vid_"), value);
+  };
 
   try {
-    await Promise.all(
-      mediaItems.map(async (item) => {
+    const preloadResults = await Promise.allSettled(
+      Array.from(activeVideoAndImageItems.values()).map(async (item) => {
         let src = item.url;
         if (item.file) {
           src = URL.createObjectURL(item.file);
@@ -239,6 +268,32 @@ export async function renderTimelineFastDirect(
         if (!src) return;
 
         if (item.type === "video") {
+          if (item.file) {
+            const input = new Input({
+              source: new BlobSource(item.file),
+              formats: VIDEO_INPUT_FORMATS,
+            });
+            try {
+              const track = await input.getPrimaryVideoTrack();
+              if (track) {
+                const timestampOffset = await track.getFirstTimestamp();
+                if (!Number.isFinite(timestampOffset)) {
+                  throw new Error("The video file has no valid first-frame timestamp.");
+                }
+                const sink = new CanvasSink(track);
+                decoderInputs.push(input);
+                addMediaAliases(decodedVideoMap, item, { sink, timestampOffset });
+              } else {
+                input.dispose();
+              }
+            } catch (error) {
+              input.dispose();
+              throw new Error(`Could not decode the original video "${item.name}" for export.`, { cause: error });
+            }
+          }
+
+          if (decodedVideoMap.has(item.id)) return;
+
           const v = document.createElement("video");
           v.src = src;
           if (!src.startsWith("blob:") && !src.startsWith("data:")) {
@@ -267,10 +322,7 @@ export async function renderTimelineFastDirect(
             setTimeout(finish, 2500);
           });
 
-          videoMap.set(item.id, v);
-          if (item.name) videoMap.set(item.name, v);
-          videoMap.set(item.id.replace(/_vid_/, "_video_"), v);
-          videoMap.set(item.id.replace(/_video_/, "_vid_"), v);
+          addMediaAliases(videoMap, item, v);
         } else if (item.type === "image") {
           const img = new Image();
           if (!src.startsWith("blob:") && !src.startsWith("data:")) {
@@ -283,20 +335,25 @@ export async function renderTimelineFastDirect(
             setTimeout(res, 1500);
           });
 
-          imageMap.set(item.id, img);
-          if (item.name) imageMap.set(item.name, img);
-          imageMap.set(item.id.replace(/_vid_/, "_video_"), img);
-          imageMap.set(item.id.replace(/_video_/, "_vid_"), img);
+          addMediaAliases(imageMap, item, img);
         }
       })
     );
+    const preloadFailure = preloadResults.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected"
+    );
+    if (preloadFailure) throw preloadFailure.reason;
   } catch (preloadErr) {
-    console.warn("[FastEngine] Preload notice:", preloadErr);
+    stage.remove();
+    createdObjectUrls.forEach((url) => URL.revokeObjectURL(url));
+    decoderInputs.forEach((input) => input.dispose());
+    throw preloadErr;
   }
 
   if (abortSignal?.aborted) {
     stage.remove();
     createdObjectUrls.forEach((u) => URL.revokeObjectURL(u));
+    decoderInputs.forEach((input) => input.dispose());
     throw new Error("Render cancelled by user.");
   }
 
@@ -316,51 +373,78 @@ export async function renderTimelineFastDirect(
   ctx.fillRect(0, 0, width, height);
 
   // 4. Prefer timestamped WebCodecs encoding so export is not paced by real-time capture.
-  const canUseWebCodecs = typeof VideoEncoder !== "undefined" && typeof AudioEncoder !== "undefined";
+  const canUseWebCodecs =
+    typeof VideoEncoder !== "undefined" && (!audioBuffer || typeof AudioEncoder !== "undefined");
   let output: Output | null = null;
   let outputTarget: BufferTarget | null = null;
   let videoSource: CanvasSource | null = null;
   let audioBufferSource: AudioBufferSource | null = null;
   let selectedMime: string;
   let selectedExt: string;
+  let encodedFormat: "mp4" | "webm" = requestedFormat;
 
   if (canUseWebCodecs) {
-    const videoCodec = requestedFormat === "mp4" ? "avc" : "vp8";
-    const audioCodec = requestedFormat === "mp4" ? "aac" : "opus";
-    const videoSupported = await canEncodeVideo(videoCodec, {
-      width,
-      height,
-      bitrate: videoBitsPerSecond,
-      frameRate: fps,
-      hardwareAcceleration: "prefer-hardware",
-    });
-    const audioSupported =
-      !audioBuffer ||
-      (await canEncodeAudio(audioCodec, {
-        numberOfChannels: audioBuffer.numberOfChannels,
-        sampleRate: audioBuffer.sampleRate,
-        bitrate: 192_000,
-      }));
+    const encoderCandidates: {
+      format: "mp4" | "webm";
+      videoCodec: "avc" | "vp8";
+      audioCodec: "aac" | "opus";
+    }[] =
+      requestedFormat === "mp4"
+        ? [
+            { format: "mp4", videoCodec: "avc", audioCodec: "aac" },
+            { format: "webm", videoCodec: "vp8", audioCodec: "opus" },
+          ]
+        : [{ format: "webm", videoCodec: "vp8", audioCodec: "opus" }];
 
-    if (videoSupported && audioSupported) {
+    let supportedEncoder:
+      | ((typeof encoderCandidates)[number] & { hardwareAcceleration: "prefer-hardware" | "no-preference" })
+      | undefined;
+    for (const candidate of encoderCandidates) {
+      const audioSupported =
+        !audioBuffer ||
+        (await canEncodeAudio(candidate.audioCodec, {
+          numberOfChannels: audioBuffer.numberOfChannels,
+          sampleRate: audioBuffer.sampleRate,
+          bitrate: 192_000,
+        }));
+      if (!audioSupported) continue;
+
+      for (const hardwareAcceleration of ["prefer-hardware", "no-preference"] as const) {
+        const videoSupported = await canEncodeVideo(candidate.videoCodec, {
+          width,
+          height,
+          bitrate: videoBitsPerSecond,
+          frameRate: fps,
+          hardwareAcceleration,
+        });
+        if (videoSupported) {
+          supportedEncoder = { ...candidate, hardwareAcceleration };
+          break;
+        }
+      }
+      if (supportedEncoder) break;
+    }
+
+    if (supportedEncoder) {
+      encodedFormat = supportedEncoder.format;
       outputTarget = new BufferTarget();
       const format =
-        requestedFormat === "mp4"
+        encodedFormat === "mp4"
           ? new Mp4OutputFormat({ fastStart: false })
           : new WebMOutputFormat();
       output = new Output({ format, target: outputTarget });
-      selectedMime = requestedFormat === "mp4" ? "video/mp4" : "video/webm";
-      selectedExt = requestedFormat;
+      selectedMime = encodedFormat === "mp4" ? "video/mp4" : "video/webm";
+      selectedExt = encodedFormat;
       videoSource = new CanvasSource(canvas, {
-        codec: videoCodec,
+        codec: supportedEncoder.videoCodec,
         bitrate: videoBitsPerSecond,
-        hardwareAcceleration: "prefer-hardware",
+        hardwareAcceleration: supportedEncoder.hardwareAcceleration,
       });
       output.addVideoTrack(videoSource, { frameRate: fps });
       if (audioBuffer) {
         audioBufferSource = new AudioBufferSource(
           {
-            codec: audioCodec,
+            codec: supportedEncoder.audioCodec,
             bitrate: 192_000,
           },
           { startTimestamp: 0 }
@@ -368,6 +452,17 @@ export async function renderTimelineFastDirect(
         output.addAudioTrack(audioBufferSource);
       }
       await output.start();
+      if (encodedFormat !== requestedFormat) {
+        onProgress({
+          isRendering: true,
+          percent: 13,
+          progress: 13,
+          currentSecond: 0,
+          totalSeconds: totalDuration,
+          stage: "preparing",
+          status: "H.264 is unavailable in this browser; exporting a compatible WebM with WebCodecs instead...",
+        });
+      }
     }
   }
 
@@ -446,6 +541,7 @@ export async function renderTimelineFastDirect(
       try {
         stage.remove();
         createdObjectUrls.forEach((u) => URL.revokeObjectURL(u));
+        decoderInputs.forEach((input) => input.dispose());
         if (activeAudioCtx) {
           activeAudioCtx.close();
         }
@@ -472,7 +568,8 @@ export async function renderTimelineFastDirect(
       for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
         if (aborted) return;
 
-        const currentTime = (frameIdx / totalFrames) * totalDuration;
+        const currentTime = frameIdx / fps;
+        const frameDuration = Math.min(1 / fps, totalDuration - currentTime);
 
         // Progress update every 12 frames
         if (frameIdx % 12 === 0 || frameIdx === totalFrames - 1) {
@@ -493,32 +590,29 @@ export async function renderTimelineFastDirect(
         ctx.fillRect(0, 0, width, height);
 
         // Find active V1 primary clip
-        let activeV1 = v1Track?.clips.find(
+        const activeV1 = v1Track?.clips.find(
           (c) => currentTime >= c.startTime && currentTime < c.startTime + c.duration
         );
-        if (!activeV1 && v1Track?.clips.length && currentTime >= totalDuration - 0.05) {
-          activeV1 = v1Track.clips[v1Track.clips.length - 1];
-        }
 
-        // Draw active V1 clip with exact trim, speed, mirror, and filter
+        // Gaps remain black rather than extending the previous clip past its timeline end.
         if (activeV1) {
-          await drawClipToCanvas(ctx, activeV1, currentTime, videoMap, imageMap, mediaItems, width, height);
+          await drawClipToCanvas(ctx, activeV1, currentTime, videoMap, decodedVideoMap, imageMap, mediaItems, width, height);
         }
 
         // Draw active V2 overlay clip (B-roll, PiP)
         const activeV2 = v2Track?.clips.find(
-          (c) => currentTime >= c.startTime && currentTime <= c.startTime + c.duration
+          (c) => currentTime >= c.startTime && currentTime < c.startTime + c.duration
         );
         if (activeV2) {
           ctx.save();
           ctx.globalAlpha = activeV2.volume ?? 0.85;
-          await drawClipToCanvas(ctx, activeV2, currentTime, videoMap, imageMap, mediaItems, width, height);
+          await drawClipToCanvas(ctx, activeV2, currentTime, videoMap, decodedVideoMap, imageMap, mediaItems, width, height);
           ctx.restore();
         }
 
         // Draw Title text clip (T1) with style & motion animations
         const activeText = t1Track?.clips.find(
-          (c) => currentTime >= c.startTime && currentTime <= c.startTime + c.duration
+          (c) => currentTime >= c.startTime && currentTime < c.startTime + c.duration
         );
         if (activeText && activeText.text) {
           drawTitleText(ctx, activeText, currentTime, width, height);
@@ -526,14 +620,14 @@ export async function renderTimelineFastDirect(
 
         // Draw Subtitle Captions
         const activeCap = captions.find(
-          (cap) => currentTime >= cap.startTime && currentTime <= cap.endTime
+          (cap) => currentTime >= cap.startTime && currentTime < cap.endTime
         );
         if (activeCap && activeCap.text) {
           drawSubtitleText(ctx, activeCap, width, height);
         }
 
         if (videoSource) {
-          await videoSource.add(currentTime, totalDuration / totalFrames);
+          await videoSource.add(currentTime, frameDuration);
         }
 
         // Timestamped encoding applies backpressure; only the MediaRecorder fallback needs periodic yielding.
@@ -589,6 +683,29 @@ export async function renderTimelineFastDirect(
         throw new Error("No supported video encoder is available in this browser.");
       }
 
+      const verificationInput = new Input({
+        source: new BlobSource(recordedBlob),
+        formats: VIDEO_INPUT_FORMATS,
+      });
+      try {
+        const videoTrack = await verificationInput.getPrimaryVideoTrack();
+        if (!videoTrack) {
+          throw new Error("The exported file does not contain a video track.");
+        }
+        const encodedDuration = await videoTrack.computeDuration();
+        const durationTolerance = Math.max(0.25, 2 / fps);
+        if (
+          !Number.isFinite(encodedDuration) ||
+          Math.abs(encodedDuration - totalDuration) > durationTolerance
+        ) {
+          throw new Error(
+            `Export duration mismatch: timeline is ${totalDuration.toFixed(2)}s, but the encoded video is ${encodedDuration.toFixed(2)}s.`
+          );
+        }
+      } finally {
+        verificationInput.dispose();
+      }
+
       cleanup();
 
       let finalBlob = recordedBlob;
@@ -600,7 +717,7 @@ export async function renderTimelineFastDirect(
       // ─────────────────────────────────────────────────────────────
       // 7. ENSURE GENUINE BROADCAST MP4 CONTAINER IF REQUESTED
       // ─────────────────────────────────────────────────────────────
-      if (requestedFormat === "mp4" && !isRealMp4) {
+      if (requestedFormat === "mp4" && encodedFormat !== "webm" && !isRealMp4) {
         onProgress({
           isRendering: true,
           percent: 96,
@@ -685,12 +802,13 @@ async function drawClipToCanvas(
   clip: TimelineClip,
   currentTime: number,
   videoMap: Map<string, HTMLVideoElement>,
+  decodedVideoMap: Map<string, { sink: CanvasSink; timestampOffset: number }>,
   imageMap: Map<string, HTMLImageElement>,
   mediaItems: MediaItem[],
   width: number,
   height: number
 ) {
-  const { video, image } = resolveClipMedia(clip, videoMap, imageMap, mediaItems);
+  const { video, decodedVideo, image } = resolveClipMedia(clip, videoMap, decodedVideoMap, imageMap, mediaItems);
 
   ctx.save();
 
@@ -719,41 +837,61 @@ async function drawClipToCanvas(
   const targetH = height * dynamicZoom;
   const offsetX = (width - targetW) / 2;
   const offsetY = (height - targetH) / 2;
+  const targetSec = Math.max(
+    0,
+    (clip.trimStart || 0) + (currentTime - clip.startTime) * (clip.speed || 1)
+  );
 
-  if (video instanceof HTMLVideoElement) {
-    const targetSec = Math.max(
-      0,
-      (clip.trimStart || 0) + (currentTime - clip.startTime) * (clip.speed || 1)
-    );
-
-    // Frame-accurate seek: whenever targetSec advances by more than 10ms
+  if (decodedVideo) {
+    const frame = await decodedVideo.sink.getCanvas(targetSec + decodedVideo.timestampOffset);
+    if (!frame) {
+      ctx.restore();
+      throw new Error(`Could not decode frame from "${clip.label || clip.mediaId}" at ${targetSec.toFixed(2)}s.`);
+    }
+    ctx.drawImage(frame.canvas, offsetX, offsetY, targetW, targetH);
+  } else if (video instanceof HTMLVideoElement) {
+    // Keep remote/legacy sources accurate; uploaded files use timestamp-based decoding above.
     if (Math.abs(video.currentTime - targetSec) > 0.01) {
-      video.currentTime = targetSec;
-      if (video.seeking || video.readyState < 2) {
-        await new Promise<void>((resolve) => {
-          let resolved = false;
-          const finish = () => {
-            if (!resolved) {
-              resolved = true;
-              video.removeEventListener("seeked", finish);
-              resolve();
-            }
-          };
-          video.addEventListener("seeked", finish, { once: true });
-          setTimeout(finish, 80);
-        });
-      }
+      const seeked = new Promise<void>((resolve, reject) => {
+        const finish = () => {
+          video.removeEventListener("seeked", finish);
+          video.removeEventListener("error", fail);
+          resolve();
+        };
+        const fail = () => {
+          video.removeEventListener("seeked", finish);
+          video.removeEventListener("error", fail);
+          reject(new Error(`Could not seek source video "${clip.label || clip.mediaId}" to ${targetSec.toFixed(2)}s.`));
+        };
+        video.addEventListener("seeked", finish, { once: true });
+        video.addEventListener("error", fail, { once: true });
+        video.currentTime = targetSec;
+      });
+      await seeked;
     }
 
-    try {
-      if (video.readyState >= 1) {
-        ctx.drawImage(video, offsetX, offsetY, targetW, targetH);
-      }
-    } catch {}
+    if (video.readyState < 2) {
+      await new Promise<void>((resolve, reject) => {
+        const loaded = () => {
+          video.removeEventListener("loadeddata", loaded);
+          video.removeEventListener("error", fail);
+          resolve();
+        };
+        const fail = () => {
+          video.removeEventListener("loadeddata", loaded);
+          video.removeEventListener("error", fail);
+          reject(new Error(`Could not load source video "${clip.label || clip.mediaId}".`));
+        };
+        video.addEventListener("loadeddata", loaded, { once: true });
+        video.addEventListener("error", fail, { once: true });
+      });
+    }
+    ctx.drawImage(video, offsetX, offsetY, targetW, targetH);
   } else if (image instanceof HTMLImageElement && image.complete && image.naturalWidth > 0) {
-    try {
-      ctx.drawImage(image, offsetX, offsetY, targetW, targetH);
-    } catch {}
+    ctx.drawImage(image, offsetX, offsetY, targetW, targetH);
+  } else {
+    ctx.restore();
+    throw new Error(`Could not find timeline media for "${clip.label || clip.mediaId}".`);
   }
 
   // Transition effects

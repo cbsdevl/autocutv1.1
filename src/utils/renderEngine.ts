@@ -132,6 +132,18 @@ export function getCanvasDimensions(
   return { width, height };
 }
 
+export function getTimelineDuration(tracks: TimelineTrack[]): number {
+  let duration = 0;
+  for (const track of tracks) {
+    if (!track.visible) continue;
+    for (const clip of track.clips) {
+      if (!Number.isFinite(clip.startTime) || !Number.isFinite(clip.duration) || clip.duration <= 0) continue;
+      duration = Math.max(duration, clip.startTime + clip.duration);
+    }
+  }
+  return duration;
+}
+
 /**
  * High-Precision Offline Audio Mixer:
  * Renders ONLY the chosen unmuted audio tracks into a studio 48kHz stereo WAV buffer.
@@ -149,8 +161,8 @@ export async function renderOfflineAudioMix(
 
   // Include ONLY audio tracks (A1, A2, A3) when muteVideoAudio is true
   const candidateTracks = muteVideoAudio
-    ? tracks.filter((t) => t.type.startsWith("A") && !t.muted)
-    : tracks.filter((t) => !t.muted);
+    ? tracks.filter((t) => t.visible && t.type.startsWith("A") && !t.muted)
+    : tracks.filter((t) => t.visible && !t.muted);
 
   const activeClips: TimelineClip[] = [];
   candidateTracks.forEach((t) => {

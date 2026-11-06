@@ -19,6 +19,7 @@ import {
   YouTubePackage,
 } from "../types";
 import { formatTimecode } from "../utils/mediaUtils";
+import { getTimelineDuration } from "../utils/renderEngine";
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -64,14 +65,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   // Calculate actual timeline duration
   const calculatedDuration = useMemo(() => {
-    let maxTime = 0;
-    tracks.forEach((t) => {
-      t.clips.forEach((c) => {
-        const end = c.startTime + c.duration;
-        if (end > maxTime) maxTime = end;
-      });
-    });
-    return Math.max(0, Math.ceil(maxTime));
+    return Math.ceil(getTimelineDuration(tracks));
   }, [tracks]);
 
   const effectiveDuration = calculatedDuration || 10;
