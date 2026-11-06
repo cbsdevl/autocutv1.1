@@ -21,7 +21,7 @@ import { PricingModal } from "./components/pricing/PricingModal";
 import { ProjectLibraryModal } from "./components/ProjectLibraryModal";
 import { GripHorizontal } from "lucide-react";
 import { useAuth } from "./context/AuthContext";
-import { authFetch } from "./utils/authClient";
+import { authFetch, removeStoredToken } from "./utils/authClient";
 import {
   AutoEditOptions,
   CaptionItem,
@@ -737,36 +737,56 @@ export default function App() {
         return;
       }
 
-      const usageResponse = await authFetch("/api/ai/consume-generation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-      });
-      if (usageResponse.status === 404) {
-        alert("The AI usage service is not loaded. Stop the current dev server and run npm run dev to reload the route.");
+      let usageResponse: Response;
+      try {
+        usageResponse = await authFetch("/api/ai/consume-generation", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+      } catch (networkErr: any) {
+        setIsAutoEditing(false);
+        alert("Network connection error: Could not reach the AutoCut server. Please check your connection and try again.");
         return;
       }
-      const responseText = await usageResponse.text();
+
+      // Explicit Session Expired handling
+      if (usageResponse.status === 401) {
+        setIsAutoEditing(false);
+        setIsAIAutoEditOpen(false);
+        removeStoredToken();
+        await refreshUser();
+        alert("Your session has expired. Please sign in to your AutoCut account to continue.");
+        navigate("/login", { state: { from: { pathname: "/editor" } } });
+        return;
+      }
+
+      if (usageResponse.status === 404) {
+        setIsAutoEditing(false);
+        alert("The AI usage service route was not found. Please restart the application server.");
+        return;
+      }
+
       let usageData: { error?: string; message?: string } = {};
       try {
+        const responseText = await usageResponse.text();
         usageData = responseText ? JSON.parse(responseText) : {};
       } catch {
-        if (!usageResponse.ok) {
-          alert(usageResponse.status === 404
-            ? "The AI usage service is not loaded. Restart the development server, then try again."
-            : "Could not verify your AI edit allowance. Please try again.");
-          return;
-        }
-        throw new Error("The AI usage service returned an invalid response.");
+        usageData = {};
       }
-      if (usageResponse.status === 401) {
+
+      if (usageResponse.status === 401 || usageData.error === "token_expired") {
+        setIsAutoEditing(false);
         setIsAIAutoEditOpen(false);
+        removeStoredToken();
         await refreshUser();
+        alert("Your session has expired. Please sign in to your AutoCut account to continue.");
         navigate("/login", { state: { from: { pathname: "/editor" } } });
         return;
       }
 
       if (usageResponse.status === 403 || usageData.error === "free_limit_reached") {
+        setIsAutoEditing(false);
         setIsAIAutoEditOpen(false);
         setPricingShowLimit(true);
         setIsPricingOpen(true);
@@ -774,7 +794,12 @@ export default function App() {
       }
 
       if (!usageResponse.ok) {
-        alert(usageData.message || usageData.error || "Could not verify your AI edit allowance. Please check your account subscription or sign in.");
+        setIsAutoEditing(false);
+        alert(
+          usageData.message ||
+          usageData.error ||
+          "Could not verify your AI edit allowance. Please check your account subscription or sign in."
+        );
         return;
       }
       await refreshUser();
@@ -1019,13 +1044,16 @@ export default function App() {
       const safeUrl = typeof renderResult === "string" ? renderResult : renderResult?.url;
       const fileSize = (renderResult as any)?.blob?.size || (renderResult as any)?.fileSize;
 
+      const fmt = (renderResult as any)?.extension?.toUpperCase() || (settings.format === "webm" ? "WEBM" : "MP4");
+
       setRenderProgress((prev) => ({
         ...prev,
         isRendering: false,
         progress: 100,
-        status: "Render Complete! Master MP4 ready.",
+        status: `Render Complete! Real ${fmt} ready.`,
         downloadUrl: safeUrl,
         fileSize: fileSize || prev?.fileSize,
+        format: fmt,
       }));
     } catch (err: any) {
       if (err?.message?.includes("canceled")) {

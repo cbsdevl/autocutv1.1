@@ -264,6 +264,8 @@ export const getUserWithSubscription = async (userId: number): Promise<UserWithS
     }
   }
 
+  const isAdmin = user.role === "admin";
+
   const ai_videos_used = activeSub?.planSlug === 'free'
     ? user.freeAiVideosUsed
     : (activeSub?.aiVideosUsed ?? 0);
@@ -281,11 +283,11 @@ export const getUserWithSubscription = async (userId: number): Promise<UserWithS
     email_verified: user.emailVerified,
     registration_ip: user.registrationIp,
     registration_device_id: user.registrationDeviceId,
-    plan_slug: activeSub?.planSlug || 'free',
-    plan_name: activeSub?.planName || 'Free',
+    plan_slug: isAdmin ? (activeSub?.planSlug === 'free' ? 'admin' : (activeSub?.planSlug || 'admin')) : (activeSub?.planSlug || 'free'),
+    plan_name: isAdmin ? (activeSub?.planSlug === 'free' ? 'Admin (Unlimited)' : (activeSub?.planName || 'Admin (Unlimited)')) : (activeSub?.planName || 'Free'),
     plan_price: activeSub?.planPrice ?? 0,
     plan_currency: activeSub?.planCurrency || 'USD',
-    ai_video_limit: activeSub?.aiVideoLimit ?? 2,
+    ai_video_limit: isAdmin ? 999999 : (activeSub?.aiVideoLimit ?? 2),
     ai_videos_used,
     subscription_id: activeSub?.subId ?? 0,
     expires_at: activeSub?.expiresAt ? new Date(activeSub.expiresAt).toISOString() : null,
@@ -513,6 +515,17 @@ export const recordLoginAttempt = async (email: string, ipAddress: string, succe
 export const consumeAiVideoUsage = async (userId: number): Promise<boolean> => {
   const userSub = await getUserWithSubscription(userId);
   if (!userSub) return false;
+
+  // Admins always have unlimited AI video generations
+  if (userSub.role === "admin" || userSub.plan_slug === "admin") {
+    if (userSub.subscription_id) {
+      await db
+        .update(userSubscriptions)
+        .set({ aiVideosUsed: sql`${userSubscriptions.aiVideosUsed} + 1` })
+        .where(eq(userSubscriptions.id, userSub.subscription_id));
+    }
+    return true;
+  }
 
   if (userSub.plan_slug === "agency" || (userSub.ai_video_limit && userSub.ai_video_limit >= 9999)) {
     if (userSub.subscription_id) {

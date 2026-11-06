@@ -19,6 +19,7 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
+import { authFetch } from "../utils/authClient";
 import { GooglePayCheckoutModal, CheckoutPlan } from "../components/payments/GooglePayCheckoutModal";
 import { GooglePayMark } from "../components/payments/GooglePayMark";
 
@@ -109,7 +110,7 @@ export const PricingPage: React.FC = () => {
   const [gpayCheckoutPlan, setGpayCheckoutPlan] = useState<CheckoutPlan | null>(null);
 
   useEffect(() => {
-    fetch("/api/plans", { credentials: "include" })
+    authFetch("/api/plans")
       .then((r) => r.json())
       .then((data) => {
         setPlans(data.plans || []);
@@ -140,10 +141,9 @@ export const PricingPage: React.FC = () => {
     setFeedback(null);
 
     try {
-      const res = await fetch("/api/subscription/upgrade", {
+      const res = await authFetch("/api/subscription/upgrade", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({ planSlug }),
       });
       const data = await res.json();

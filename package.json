@@ -11,6 +11,8 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
     "@google-pay/button-react": "^4.1.0",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",

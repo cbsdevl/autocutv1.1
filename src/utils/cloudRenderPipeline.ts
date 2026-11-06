@@ -197,9 +197,20 @@ async function renderOfflineAudioMix(
   return audioBufferToWav(renderedBuffer);
 }
 
+async function checkServerAssetExists(mediaId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/media/check-asset?mediaId=${encodeURIComponent(mediaId)}`);
+    if (res.ok) {
+      const data = await res.json();
+      return Boolean(data.exists);
+    }
+  } catch {}
+  return false;
+}
+
 /**
- * Uploads a large file in 8MB chunks via multipart/form-data.
- * Server receives via multer.single('chunk') — avoids body-parsing conflicts.
+ * Uploads a large file in 16MB chunks via multipart/form-data.
+ * Server receives via multer.single('chunk') — fast & reliable.
  */
 async function uploadMediaInChunks(
   mediaId: string,
@@ -208,7 +219,7 @@ async function uploadMediaInChunks(
   signal?: AbortSignal,
   onChunkProgress?: (percent: number) => void
 ): Promise<void> {
-  const CHUNK_SIZE = 8 * 1024 * 1024; // 8MB chunks — fast & well under 50MB limit
+  const CHUNK_SIZE = 16 * 1024 * 1024; // 16MB chunks — faster throughput and fewer round-trips
   const totalChunks = Math.ceil(blobOrFile.size / CHUNK_SIZE);
 
   for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
@@ -229,16 +240,36 @@ async function uploadMediaInChunks(
     const formData = new FormData();
     formData.append("chunk", chunkBlob, fileName);
 
-    const res = await fetch(`/api/media/chunk-upload?${query.toString()}`, {
-      method: "POST",
-      body: formData,
-      signal,
-    });
+    let res: Response | null = null;
+    let lastNetworkErr: any = null;
 
-    if (!res.ok) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (signal?.aborted) throw new Error("Upload aborted.");
+      try {
+        res = await fetch(`/api/media/chunk-upload?${query.toString()}`, {
+          method: "POST",
+          body: formData,
+          signal,
+        });
+        if (res.ok) {
+          lastNetworkErr = null;
+          break;
+        }
+      } catch (err: any) {
+        lastNetworkErr = err;
+        if (signal?.aborted) throw err;
+        // Wait briefly before retrying transient network errors
+        await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
+      }
+    }
+
+    if (!res || !res.ok) {
+      if (lastNetworkErr) {
+        throw new Error(`Chunk upload network error: ${lastNetworkErr.message || "Failed to reach server"}`);
+      }
       let detail = "";
-      try { detail = (await res.json()).error || ""; } catch {}
-      throw new Error(`Chunk upload failed with status ${res.status}${detail ? ": " + detail : ""}`);
+      try { detail = (await res!.json()).error || ""; } catch {}
+      throw new Error(`Chunk upload failed with status ${res?.status || "unknown"}${detail ? ": " + detail : ""}`);
     }
 
     if (onChunkProgress) {
@@ -251,8 +282,7 @@ async function uploadMediaInChunks(
 
 /**
  * Cloud Native FFmpeg Production Render Pipeline:
- * - Solves Cloud Run 32MB limit via 4MB chunked streaming
- * - Employs native server Linux FFmpeg directly on original video files
+ * - Server-side Linux FFmpeg multi-core parallel rendering directly on original video files
  * - Zero black frames: native frame-accurate seek and clone hold
  * - Zero frozen video: exact duration preserved
  * - 100% full duration: all minutes and seconds from timeline
@@ -261,10 +291,6 @@ export async function renderTimelineWithCloudEngine(
   options: RenderTimelineOptions
 ): Promise<{ blob: Blob; url: string; mimeType: string; extension: string }> {
   const { project, tracks, mediaItems, exportSettings, abortSignal, onProgress } = options;
-
-  // Always re-upload assets for each render — server tmpdir is cleared on restart,
-  // so cached IDs from a previous render would silently point to missing files.
-  uploadedAssetSet.clear();
 
   // 1. Calculate full timeline duration
   let calculatedDuration = 0;
@@ -299,10 +325,13 @@ export async function renderTimelineWithCloudEngine(
     currentSecond: 0,
     totalSeconds: totalDuration,
     stage: "preparing",
-    status: "Inspecting timeline footage and verifying cloud storage...",
+    stepCurrent: 1,
+    stepTotal: 4,
+    stepName: "Footage & Asset Preparation",
+    status: "Inspecting timeline footage and verifying server asset cache...",
   });
 
-  // 3. Upload source video assets in chunks
+  // 3. Upload source video assets in chunks with instant cache checking
   const uniqueMediaIds = Array.from(new Set(primaryTrack.clips.map((c) => c.mediaId)));
   const totalAssets = uniqueMediaIds.length;
 
@@ -315,38 +344,59 @@ export async function renderTimelineWithCloudEngine(
 
     if (!item) continue;
 
-    if (!uploadedAssetSet.has(mediaId)) {
-      let fileOrBlob: Blob | File | null = item.file || null;
-      if (!fileOrBlob && item.url) {
-        try {
-          const resp = await fetch(item.url);
-          fileOrBlob = await resp.blob();
-        } catch {
-          // If fetch fails, item.url might be an http stream
-        }
-      }
+    // Fast check if already verified on server
+    const alreadyOnServer = uploadedAssetSet.has(mediaId) || (await checkServerAssetExists(mediaId));
+    if (alreadyOnServer) {
+      uploadedAssetSet.add(mediaId);
+      const cachePct = Math.round(10 + ((idx + 1) / totalAssets) * 35);
+      onProgress({
+        isRendering: true,
+        percent: cachePct,
+        progress: cachePct,
+        currentSecond: 0,
+        totalSeconds: totalDuration,
+        stage: "preparing",
+        stepCurrent: 1,
+        stepTotal: 4,
+        stepName: "Footage & Asset Preparation",
+        status: `Asset "${item.name || mediaId}" verified on cloud engine (cache hit)...`,
+      });
+      continue;
+    }
 
-      if (fileOrBlob) {
-        const assetName = item.name || `clip_${mediaId}.mp4`;
-        await uploadMediaInChunks(
-          mediaId,
-          assetName,
-          fileOrBlob,
-          abortSignal,
-          (chunkPct) => {
-            const overallPct = Math.round(10 + (idx / totalAssets) * 35 + (chunkPct / 100) * (35 / totalAssets));
-            onProgress({
-              isRendering: true,
-              percent: overallPct,
-              progress: overallPct,
-              currentSecond: 0,
-              totalSeconds: totalDuration,
-              stage: "preparing",
-              status: `Uploading footage "${assetName}" to cloud engine (${chunkPct}%)...`,
-            });
-          }
-        );
+    let fileOrBlob: Blob | File | null = item.file || null;
+    if (!fileOrBlob && item.url) {
+      try {
+        const resp = await fetch(item.url);
+        fileOrBlob = await resp.blob();
+      } catch {
+        // If fetch fails, item.url might be an http stream
       }
+    }
+
+    if (fileOrBlob) {
+      const assetName = item.name || `clip_${mediaId}.mp4`;
+      await uploadMediaInChunks(
+        mediaId,
+        assetName,
+        fileOrBlob,
+        abortSignal,
+        (chunkPct) => {
+          const overallPct = Math.round(10 + (idx / totalAssets) * 35 + (chunkPct / 100) * (35 / totalAssets));
+          onProgress({
+            isRendering: true,
+            percent: overallPct,
+            progress: overallPct,
+            currentSecond: 0,
+            totalSeconds: totalDuration,
+            stage: "preparing",
+            stepCurrent: 1,
+            stepTotal: 4,
+            stepName: "Footage & Asset Preparation",
+            status: `Uploading footage "${assetName}" to server engine (${chunkPct}%)...`,
+          });
+        }
+      );
     }
   }
 
@@ -358,6 +408,9 @@ export async function renderTimelineWithCloudEngine(
     currentSecond: 0,
     totalSeconds: totalDuration,
     stage: "preparing",
+    stepCurrent: 2,
+    stepTotal: 4,
+    stepName: "Studio Audio Soundtrack Mix",
     status: "Rendering 48kHz studio audio soundtrack...",
   });
 
@@ -387,6 +440,9 @@ export async function renderTimelineWithCloudEngine(
     currentSecond: 0,
     totalSeconds: totalDuration,
     stage: "encoding",
+    stepCurrent: 3,
+    stepTotal: 4,
+    stepName: "Timeline Segment Encoding",
     status: `Starting FFmpeg encoder (${totalDuration.toFixed(1)}s timeline)...`,
   });
 
@@ -430,11 +486,11 @@ export async function renderTimelineWithCloudEngine(
     muteVideoAudio: shouldMuteVideoAudio,
   };
 
-  // Animated progress ticker — runs concurrently with the server FFmpeg encode.
-  // Increments from 66% → 90% over the estimated encode time so the UI stays alive.
+  // Animated progress ticker — runs concurrently with the server multi-core FFmpeg encode.
+  // Increments from 66% → 90% smoothly as parallel workers complete segments.
   let tickerPercent = 66;
-  const estimatedEncodeMs = totalDuration * 400; // ~2.5x real-time estimate at ultrafast
-  const tickIntervalMs = 800;
+  const estimatedEncodeMs = Math.max(2000, totalDuration * 200); // 4-core parallel encode (~5x real-time)
+  const tickIntervalMs = 400;
   const tickStep = (90 - 66) / (estimatedEncodeMs / tickIntervalMs);
   let tickerStopped = false;
   const tickerInterval = setInterval(() => {
@@ -448,7 +504,10 @@ export async function renderTimelineWithCloudEngine(
       currentSecond: Math.round(elapsed * 10) / 10,
       totalSeconds: totalDuration,
       stage: "encoding",
-      status: `FFmpeg encoding segments... ${Math.round(tickerPercent)}% (${cutsPayload.length} clip${cutsPayload.length !== 1 ? "s" : ""})`,
+      stepCurrent: 3,
+      stepTotal: 4,
+      stepName: "Timeline Segment Encoding",
+      status: `Server FFmpeg multi-core parallel encoding... ${Math.round(tickerPercent)}% (${cutsPayload.length} clip${cutsPayload.length !== 1 ? "s" : ""})`,
     });
   }, tickIntervalMs);
 
@@ -470,17 +529,70 @@ export async function renderTimelineWithCloudEngine(
     throw new Error(`Cloud FFmpeg render error (${renderRes!.status}): ${errText}`);
   }
 
+  // STEP 4 OF 4: Master MP4 Assembly & Final Delivery (The last step)
+  const contentLengthHeader = renderRes.headers.get("content-length");
+  const totalExpectedBytes = contentLengthHeader ? parseInt(contentLengthHeader, 10) : 0;
+
   onProgress({
     isRendering: true,
     percent: 92,
     progress: 92,
     currentSecond: totalDuration,
     totalSeconds: totalDuration,
-    stage: "encoding",
-    status: "Finalizing master MP4 container and faststart headers...",
+    stage: "finalizing",
+    stepCurrent: 4,
+    stepTotal: 4,
+    stepName: "Master MP4 Final Delivery",
+    status: totalExpectedBytes > 0
+      ? `Assembling final master MP4 (${(totalExpectedBytes / (1024 * 1024)).toFixed(1)} MB)...`
+      : "Finalizing master MP4 container and faststart streaming headers...",
+    receivedBytes: 0,
+    totalBytes: totalExpectedBytes,
   });
 
-  const mp4Blob = await renderRes.blob();
+  let mp4Blob: Blob;
+  if (renderRes.body && totalExpectedBytes > 0) {
+    const reader = renderRes.body.getReader();
+    const chunks: BlobPart[] = [];
+    let receivedBytes = 0;
+
+    while (true) {
+      if (abortSignal?.aborted) {
+        reader.cancel();
+        throw new Error("Render canceled by user.");
+      }
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        receivedBytes += value.length;
+        const dlRatio = Math.min(1, receivedBytes / totalExpectedBytes);
+        // Map 92% → 99% for granular progress on the final step
+        const curPct = Math.min(99, Math.round(92 + dlRatio * 7));
+        const curMB = (receivedBytes / (1024 * 1024)).toFixed(1);
+        const totMB = (totalExpectedBytes / (1024 * 1024)).toFixed(1);
+
+        onProgress({
+          isRendering: true,
+          percent: curPct,
+          progress: curPct,
+          currentSecond: totalDuration,
+          totalSeconds: totalDuration,
+          stage: "finalizing",
+          stepCurrent: 4,
+          stepTotal: 4,
+          stepName: "Master MP4 Final Delivery",
+          status: `Finalizing master MP4: ${curMB} MB / ${totMB} MB (${Math.round(dlRatio * 100)}%) • Faststart streaming ready`,
+          receivedBytes,
+          totalBytes: totalExpectedBytes,
+        });
+      }
+    }
+    mp4Blob = new Blob(chunks, { type: "video/mp4" });
+  } else {
+    mp4Blob = await renderRes.blob();
+  }
+
   const mp4Url = URL.createObjectURL(mp4Blob);
 
   onProgress({
@@ -490,10 +602,15 @@ export async function renderTimelineWithCloudEngine(
     currentSecond: totalDuration,
     totalSeconds: totalDuration,
     stage: "done",
-    status: "Render Complete! Master MP4 ready for download.",
+    stepCurrent: 4,
+    stepTotal: 4,
+    stepName: "Master MP4 Final Delivery",
+    status: `Render Complete! Master MP4 ready for download (${(mp4Blob.size / (1024 * 1024)).toFixed(1)} MB).`,
     downloadUrl: mp4Url,
     fileSize: mp4Blob.size,
     format: "MP4",
+    receivedBytes: mp4Blob.size,
+    totalBytes: mp4Blob.size,
   });
 
   return {

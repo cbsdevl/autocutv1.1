@@ -21,6 +21,7 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
+import { authFetch } from "../utils/authClient";
 import { listProjectsForUser } from "../utils/projectStorage";
 
 interface PaymentItem {
@@ -52,7 +53,7 @@ export const AccountPage: React.FC = () => {
       refreshUser().catch(() => {});
 
       setLoadingPayments(true);
-      fetch("/api/payments/history", { credentials: "include" })
+      authFetch("/api/payments/history")
         .then((r) => r.json())
         .then((data) => {
           setPayments(data.payments || []);

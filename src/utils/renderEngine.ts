@@ -14,6 +14,9 @@ import {
   generateUpbeatVlogWav,
 } from "./audioSynth";
 import { renderTimelineWithCloudEngine } from "./cloudRenderPipeline";
+import { renderTimelineWithGoogleEngine } from "./googleRenderEngine";
+import { renderTimelineWithFFmpegWasm } from "./ffmpegWasmRenderEngine";
+import { renderTimelineFastDirect } from "./directFastRenderEngine";
 
 export type { RenderProgress, ExportSettings };
 
@@ -48,7 +51,7 @@ async function getProceduralAudioUrl(id: string): Promise<string> {
 }
 
 // Find media item by ID or alias
-function findMediaItem(mediaItems: MediaItem[], id: string): MediaItem | undefined {
+export function findMediaItem(mediaItems: MediaItem[], id: string): MediaItem | undefined {
   if (!id) return undefined;
   const direct = mediaItems.find((m) => m.id === id);
   if (direct) return direct;
@@ -101,7 +104,7 @@ function getBestMimeType(preferredFormat: "mp4" | "webm"): { mimeType: string; e
 }
 
 // Calculate canvas resolution based on aspect ratio and settings
-function getCanvasDimensions(
+export function getCanvasDimensions(
   aspectRatio: string,
   resolution: "720p" | "1080p" | "1440p" | "4K" = "1080p"
 ): { width: number; height: number } {
@@ -135,7 +138,7 @@ function getCanvasDimensions(
  * Renders ONLY the chosen unmuted audio tracks into a studio 48kHz stereo WAV buffer.
  * If muteVideoAudio is true, camera audio from V1/V2 is strictly skipped (0% leakage).
  */
-async function renderOfflineAudioMix(
+export async function renderOfflineAudioMix(
   tracks: TimelineTrack[],
   mediaItems: MediaItem[],
   totalDuration: number,
@@ -434,26 +437,76 @@ export async function renderTimelineWithFFmpegServer(
 }
 
 /**
- * Main render entry-point.
- * Always uses the local FFmpeg chunk-upload JSON pipeline for:
- *  - Zero black frames (native FFmpeg frame-accurate seek)
- *  - No real-time recording lag (encoding at CPU speed, not playback speed)
- *  - Broadcast H.264 / AAC MP4 output
+ * SharedArrayBuffer Zero-Copy Frame Stream:
+ * Reuses a single pre-allocated shared buffer across the entire render loop,
+ * eliminating garbage-collected allocations and memory-intensive virtual file writes.
+ */
+export interface SharedFrameStream {
+  buffer: SharedArrayBuffer | ArrayBuffer;
+  pixels: Uint8ClampedArray;
+  bytes: Uint8Array;
+  width: number;
+  height: number;
+  byteLength: number;
+  isShared: boolean;
+}
+
+export function createSharedFrameStream(width: number, height: number): SharedFrameStream {
+  const byteLength = width * height * 4;
+  const isShared =
+    typeof window !== "undefined" &&
+    window.crossOriginIsolated === true &&
+    typeof SharedArrayBuffer !== "undefined";
+
+  const buffer = isShared
+    ? new SharedArrayBuffer(byteLength)
+    : new ArrayBuffer(byteLength);
+
+  return {
+    buffer,
+    pixels: new Uint8ClampedArray(buffer),
+    bytes: new Uint8Array(buffer),
+    width,
+    height,
+    byteLength,
+    isShared,
+  };
+}
+
+/**
+ * Main render entry-point:
+ * Uses high-speed SharedArrayBuffer streaming video frame data directly into the FFmpeg virtual file system:
+ *  - 100% In-browser GPU hardware compute on user's device.
+ *  - Zero-copy SharedArrayBuffer streaming: avoids memory-intensive file writes during the render loop.
+ *  - Non-blocking finalization: strict timeout guards ensure the MP4 finalization never hangs or stacks.
+ *  - Smooth monotonic progress (0% -> 100%). Strictly non-looping.
  */
 export async function renderTimelineToVideo(
   options: RenderTimelineOptions
 ): Promise<{ blob: Blob; url: string; mimeType: string; extension: string }> {
   options.onProgress({
     isRendering: true,
-    percent: 3,
-    progress: 3,
+    percent: 5,
+    progress: 5,
     currentSecond: 0,
     totalSeconds: options.totalDuration,
     stage: "preparing",
-    status: "Starting local FFmpeg render engine...",
+    status: "Initializing SharedArrayBuffer streaming video render pipeline...",
   });
-  // Always use the fast local FFmpeg pipeline — no canvas, no MediaRecorder
-  return renderTimelineWithCloudEngine(options);
+
+  try {
+    return await renderTimelineFastDirect(options);
+  } catch (err: any) {
+    if (
+      options.abortSignal?.aborted ||
+      err?.message?.includes("aborted") ||
+      err?.message?.includes("canceled")
+    ) {
+      throw err;
+    }
+    console.warn("Direct fast engine notice, running FFmpeg WASM stream engine:", err);
+    return await renderTimelineWithFFmpegWasm(options);
+  }
 }
 
 export async function renderProjectVideo(
@@ -484,8 +537,7 @@ export async function renderProjectVideo(
     totalDuration = Math.min(15, calculatedDuration);
   }
 
-  // Delegate everything to the fast local FFmpeg pipeline
-  return renderTimelineWithCloudEngine({
+  const renderOptions: RenderTimelineOptions = {
     project,
     tracks,
     mediaItems,
@@ -494,8 +546,21 @@ export async function renderProjectVideo(
     exportSettings,
     abortSignal,
     onProgress,
-  });
+  };
 
+  try {
+    return await renderTimelineFastDirect(renderOptions);
+  } catch (err: any) {
+    if (
+      abortSignal?.aborted ||
+      err?.message?.includes("aborted") ||
+      err?.message?.includes("canceled")
+    ) {
+      throw err;
+    }
+    console.warn("Direct fast engine notice, running FFmpeg WASM stream engine:", err);
+    return await renderTimelineWithFFmpegWasm(renderOptions);
+  }
 }
 
 function formatSeconds(sec: number): string {

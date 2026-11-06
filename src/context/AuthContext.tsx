@@ -66,6 +66,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
       } else {
         setCurrentUser(null);
+        if (res.status === 401) {
+          removeStoredToken();
+        }
       }
     } catch {
       setCurrentUser(null);

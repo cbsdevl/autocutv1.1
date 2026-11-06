@@ -3,6 +3,7 @@ import {
   X, Zap, Check, Loader2, Star, Calendar, Clock, AlertCircle, CreditCard
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
+import { authFetch } from "../../utils/authClient";
 import { GooglePayCheckoutModal, CheckoutPlan } from "../payments/GooglePayCheckoutModal";
 
 interface Plan {
@@ -35,7 +36,7 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose, sho
   useEffect(() => {
     if (!isOpen) return;
     setLoading(true);
-    fetch("/api/plans", { credentials: "include" })
+    authFetch("/api/plans")
       .then((r) => r.json())
       .then((d) => { setPlans(d.plans || []); setLoading(false); })
       .catch(() => setLoading(false));
@@ -48,10 +49,9 @@ export const PricingModal: React.FC<PricingModalProps> = ({ isOpen, onClose, sho
     setUpgrading(planSlug);
     setErrorMsg(null);
     try {
-      const res = await fetch("/api/subscription/upgrade", {
+      const res = await authFetch("/api/subscription/upgrade", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({ planSlug }),
       });
       const data = await res.json();

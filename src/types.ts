@@ -247,6 +247,11 @@ export interface RenderProgress {
   errorMessage?: string;
   fileSize?: number;
   format?: string;
+  stepCurrent?: number;
+  stepTotal?: number;
+  stepName?: string;
+  receivedBytes?: number;
+  totalBytes?: number;
 }
 
 export interface ExportSettings {

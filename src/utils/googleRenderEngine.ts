@@ -248,6 +248,9 @@ export async function renderTimelineWithGoogleEngine(
     currentSecond: 0,
     totalSeconds: totalDuration,
     stage: "preparing",
+    stepCurrent: 1,
+    stepTotal: 4,
+    stepName: "Hardware Decoder Preparation",
     status: "Initializing Google frame-accurate rendering engine...",
   });
 
@@ -272,6 +275,9 @@ export async function renderTimelineWithGoogleEngine(
     currentSecond: 0,
     totalSeconds: totalDuration,
     stage: "preparing",
+    stepCurrent: 2,
+    stepTotal: 4,
+    stepName: "Studio Audio Soundtrack Mix",
     status: "Pre-warming hardware video decoders in browser viewport...",
   });
 
@@ -415,6 +421,9 @@ export async function renderTimelineWithGoogleEngine(
             currentSecond: Math.round(currentTime * 10) / 10,
             totalSeconds: Math.round(totalDuration * 10) / 10,
             stage: "rendering",
+            stepCurrent: 3,
+            stepTotal: 4,
+            stepName: "Frame-Accurate Video Rendering",
             status: `Rendering frame ${frameIdx + 1}/${totalFrames} (${Math.floor(currentTime)}s / ${Math.floor(totalDuration)}s)...`,
           });
         }
@@ -515,15 +524,22 @@ export async function renderTimelineWithGoogleEngine(
       cleanup();
 
       // 8. Multiplex with Server FFmpeg for pristine H.264 broadcast MP4 master
+      // 8. Multiplex with Server FFmpeg for pristine H.264 broadcast MP4 master (The last step)
       try {
+        const estTotalBytes = rawVideoBlob.size;
         onProgress({
           isRendering: true,
-          percent: 97,
-          progress: 97,
+          percent: 94,
+          progress: 94,
           currentSecond: totalDuration,
           totalSeconds: totalDuration,
-          stage: "encoding",
+          stage: "finalizing",
+          stepCurrent: 4,
+          stepTotal: 4,
+          stepName: "Master MP4 Final Delivery",
           status: "Multiplexing pristine H.264 MP4 master with 48kHz audio...",
+          receivedBytes: 0,
+          totalBytes: estTotalBytes,
         });
 
         const formData = new FormData();
@@ -543,7 +559,51 @@ export async function renderTimelineWithGoogleEngine(
         );
 
         if (muxRes.ok) {
-          const mp4Blob = await muxRes.blob();
+          const clHeader = muxRes.headers.get("content-length");
+          const totalBytes = clHeader ? parseInt(clHeader, 10) : estTotalBytes;
+          let mp4Blob: Blob;
+
+          if (muxRes.body && totalBytes > 0) {
+            const reader = muxRes.body.getReader();
+            const chunks: BlobPart[] = [];
+            let received = 0;
+
+            while (true) {
+              if (abortSignal?.aborted) {
+                reader.cancel();
+                throw new Error("Render canceled by user.");
+              }
+              const { done, value } = await reader.read();
+              if (done) break;
+              if (value) {
+                chunks.push(value);
+                received += value.length;
+                const ratio = Math.min(1, received / totalBytes);
+                const pct = Math.min(99, Math.round(94 + ratio * 5));
+                const recMB = (received / (1024 * 1024)).toFixed(1);
+                const totMB = (totalBytes / (1024 * 1024)).toFixed(1);
+
+                onProgress({
+                  isRendering: true,
+                  percent: pct,
+                  progress: pct,
+                  currentSecond: totalDuration,
+                  totalSeconds: totalDuration,
+                  stage: "finalizing",
+                  stepCurrent: 4,
+                  stepTotal: 4,
+                  stepName: "Master MP4 Final Delivery",
+                  status: `Finalizing master MP4: ${recMB} MB / ${totMB} MB (${Math.round(ratio * 100)}%) • Faststart ready`,
+                  receivedBytes: received,
+                  totalBytes: totalBytes,
+                });
+              }
+            }
+            mp4Blob = new Blob(chunks, { type: "video/mp4" });
+          } else {
+            mp4Blob = await muxRes.blob();
+          }
+
           const mp4Url = URL.createObjectURL(mp4Blob);
 
           onProgress({
@@ -553,10 +613,15 @@ export async function renderTimelineWithGoogleEngine(
             currentSecond: totalDuration,
             totalSeconds: totalDuration,
             stage: "done",
-            status: "Render Complete! Master MP4 verified and ready.",
+            stepCurrent: 4,
+            stepTotal: 4,
+            stepName: "Master MP4 Final Delivery",
+            status: `Render Complete! Master MP4 verified and ready (${(mp4Blob.size / (1024 * 1024)).toFixed(1)} MB).`,
             downloadUrl: mp4Url,
             fileSize: mp4Blob.size,
             format: "MP4",
+            receivedBytes: mp4Blob.size,
+            totalBytes: mp4Blob.size,
           });
 
           resolve({
