@@ -27,6 +27,8 @@ import {
   Archive,
   LifeBuoy,
   Home,
+  Smartphone,
+  Monitor,
 } from "lucide-react";
 import { AspectRatio, MediaItem, ProjectSettings } from "../types";
 import { useAuth } from "../context/AuthContext";
@@ -55,6 +57,7 @@ interface TopBarProps {
   onExportProject?: () => void;
   onSaveProject?: () => void;
   onBeforeLogout?: () => Promise<void>;
+  onOpenInstallApp?: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -80,6 +83,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onExportProject,
   onSaveProject,
   onBeforeLogout,
+  onOpenInstallApp,
 }) => {
   const { currentUser, logout } = useAuth();
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -253,6 +257,18 @@ export const TopBar: React.FC<TopBarProps> = ({
           )}
         </button>
 
+        {/* Install Mobile & PC App Button */}
+        {onOpenInstallApp && (
+          <button
+            onClick={onOpenInstallApp}
+            className="flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded bg-zinc-900 hover:bg-zinc-800 text-amber-400 border border-amber-500/20 hover:border-amber-500/40 transition min-h-[34px] cursor-pointer"
+            title="Install Mobile (Android/iOS) and PC (.EXE) Application"
+          >
+            <Smartphone className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="hidden sm:inline">Install App</span>
+          </button>
+        )}
+
         {/* AI Auto Edit Button */}
         <button
           onClick={onOpenAIAutoEdit}
@@ -286,6 +302,19 @@ export const TopBar: React.FC<TopBarProps> = ({
 
           {showMobileMenu && (
             <div className="absolute right-0 top-full mt-1.5 w-56 bg-zinc-900 border border-zinc-800 rounded-md shadow-xl py-1 z-50 text-xs">
+              {onOpenInstallApp && (
+                <button
+                  onClick={() => {
+                    setShowMobileMenu(false);
+                    onOpenInstallApp();
+                  }}
+                  className="w-full text-left px-3 py-2.5 text-amber-400 hover:bg-zinc-800 flex items-center gap-2.5 font-semibold"
+                >
+                  <Smartphone className="w-4 h-4 text-amber-400" />
+                  <span>Install Mobile & PC App</span>
+                </button>
+              )}
+
               <button
                 onClick={() => {
                   setShowMobileMenu(false);

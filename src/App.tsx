@@ -19,6 +19,8 @@ import { MobileBottomNav, MobileTab } from "./components/MobileBottomNav";
 import { AdminDashboard } from "./components/admin/AdminDashboard";
 import { PricingModal } from "./components/pricing/PricingModal";
 import { ProjectLibraryModal } from "./components/ProjectLibraryModal";
+import { InstallAppModal } from "./components/InstallAppModal";
+import { OfflineIndicator } from "./components/OfflineIndicator";
 import { GripHorizontal } from "lucide-react";
 import { useAuth } from "./context/AuthContext";
 import { authFetch, removeStoredToken } from "./utils/authClient";
@@ -117,6 +119,7 @@ export default function App() {
   const [isPricingOpen, setIsPricingOpen] = useState<boolean>(false);
   const [pricingShowLimit, setPricingShowLimit] = useState<boolean>(false);
   const [isProjectLibraryOpen, setIsProjectLibraryOpen] = useState(false);
+  const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
 
   // Resizable timeline panel (desktop)
   const [timelineHeight, setTimelineHeight] = useState(240);
@@ -1369,6 +1372,7 @@ export default function App() {
           setPricingShowLimit(false);
           setIsPricingOpen(true);
         }}
+        onOpenInstallApp={() => setIsInstallModalOpen(true)}
         onSelectTab={(tab) => {
           setActiveTab(tab as TabType);
           setMobileTab(tab as MobileTab);
@@ -1710,6 +1714,7 @@ export default function App() {
         hasSelectedClip={Boolean(selectedClipId)}
         onOpenProjects={handleOpenProjectLibrary}
         projectCount={savedProjects.length}
+        onOpenInstallApp={() => setIsInstallModalOpen(true)}
       />
 
       {/* Modals */}
@@ -1773,6 +1778,12 @@ export default function App() {
         onNewProject={() => setIsProjectModalOpen(true)}
         isSaving={isSaving}
       />
+
+      <InstallAppModal
+        isOpen={isInstallModalOpen}
+        onClose={() => setIsInstallModalOpen(false)}
+      />
+      <OfflineIndicator />
     </div>
     {isAdminOpen && currentUser?.role === "admin" && (
       <AdminDashboard onClose={() => setIsAdminOpen(false)} />

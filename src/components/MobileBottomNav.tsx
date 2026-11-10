@@ -10,6 +10,7 @@ import {
   Layers,
   ShieldAlert,
   Folders,
+  Smartphone,
 } from "lucide-react";
 import { MediaItem } from "../types";
 
@@ -31,6 +32,7 @@ interface MobileBottomNavProps {
   /** Called when the user taps the Projects button on mobile. */
   onOpenProjects?: () => void;
   projectCount?: number;
+  onOpenInstallApp?: () => void;
 }
 
 export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
@@ -40,13 +42,14 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
   hasSelectedClip,
   onOpenProjects,
   projectCount,
+  onOpenInstallApp,
 }) => {
   const hasRisk = mediaItems.some(
     (m) => m.riskLevel === "High" || m.riskLevel === "Medium"
   );
 
   const tabs: {
-    id: MobileTab | "projects";
+    id: MobileTab | "projects" | "install";
     label: string;
     icon: React.ReactNode;
     badge?: boolean;
@@ -102,6 +105,16 @@ export const MobileBottomNav: React.FC<MobileBottomNavProps> = ({
       badge: hasSelectedClip,
       badgeColor: "bg-amber-400",
     },
+    ...(onOpenInstallApp
+      ? [
+          {
+            id: "install" as const,
+            label: "Install",
+            icon: <Smartphone className="w-5 h-5 text-amber-400" />,
+            onPress: onOpenInstallApp,
+          },
+        ]
+      : []),
   ];
 
   return (

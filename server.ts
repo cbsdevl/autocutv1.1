@@ -55,10 +55,13 @@ import { sendVerificationEmail } from "./src/utils/mailer.js";
 dotenv.config();
 
 const execFileAsync = promisify(execFile);
+const resolvedFfmpegPath =
+  process.env.FFMPEG_PATH ||
+  (fs.existsSync("/usr/bin/ffmpeg") ? "/usr/bin/ffmpeg" : ffmpegStatic || "ffmpeg");
 const runFFmpeg = (args: string[]) =>
-  execFileAsync(process.env.FFMPEG_PATH || ffmpegStatic || "ffmpeg", args, {
+  execFileAsync(resolvedFfmpegPath, args, {
     maxBuffer: 256 * 1024 * 1024,
-    timeout: 60000,
+    timeout: 120000,
   });
 
 function ffmpegColor(value: string | undefined, fallback: string): string {
@@ -219,6 +222,9 @@ declare global {
   }
 }
 
+// Designated Administrator accounts
+const ADMIN_EMAILS = new Set(["admin@autocut.ai", "nizeyimanaplacide2@gmail.com"]);
+
 // Middleware: require authenticated user (any role)
 async function requireAuth(req: Request, res: Response, next: NextFunction) {
   try {
@@ -228,6 +234,11 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
       if (payload) {
         const user = await getUserWithSubscription(payload.userId);
         if (user) {
+          // Safeguard: Ensure designated admin accounts always have admin role
+          if (user.email && ADMIN_EMAILS.has(user.email.toLowerCase().trim()) && user.role !== "admin") {
+            await updateUserRole(user.id, "admin");
+            user.role = "admin";
+          }
           (req as any).user = user;
           return next();
         }
@@ -556,6 +567,10 @@ app.post("/api/auth/login", async (req: Request, res: Response) => {
       return;
     }
 
+    if (ADMIN_EMAILS.has(normalizedEmail) && dbUser.role !== "admin") {
+      await updateUserRole(dbUser.id, "admin");
+    }
+
     await recordLoginAttempt(normalizedEmail, clientIp, true);
     await recordAuthAudit("login_success", {
       userId: dbUser.id,
@@ -627,6 +642,11 @@ app.post("/api/auth/google", async (req: Request, res: Response) => {
         await linkGoogleAccount(user.id, resolvedGoogleId, resolvedPicture);
       }
 
+      // Safeguard: Ensure designated admin accounts always have admin role
+      if (ADMIN_EMAILS.has(normalizedEmail) && user.role !== "admin") {
+        await updateUserRole(user.id, "admin");
+      }
+
       await recordAuthAudit("google_login_success", {
         userId: user.id,
         email: normalizedEmail,
@@ -642,21 +662,25 @@ app.post("/api/auth/google", async (req: Request, res: Response) => {
       return;
     }
 
-    // New user signing up with Google: Check Multi-Account restriction
-    const deviceCheck = await checkDeviceOrIpRegistration(clientIp, deviceFingerprint || "");
-    if (deviceCheck.isBlocked) {
-      await recordAuthAudit("google_register_blocked_multi_account", {
-        email: normalizedEmail,
-        ipAddress: clientIp,
-        deviceFingerprint,
-        details: deviceCheck.reason,
-      });
-      res.status(403).json({
-        error: deviceCheck.reason,
-        blocked: true,
-        registeredEmail: deviceCheck.registeredEmail,
-      });
-      return;
+    const isDesignatedAdmin = ADMIN_EMAILS.has(normalizedEmail);
+
+    // New user signing up with Google: Check Multi-Account restriction (designated admins bypass)
+    if (!isDesignatedAdmin) {
+      const deviceCheck = await checkDeviceOrIpRegistration(clientIp, deviceFingerprint || "");
+      if (deviceCheck.isBlocked) {
+        await recordAuthAudit("google_register_blocked_multi_account", {
+          email: normalizedEmail,
+          ipAddress: clientIp,
+          deviceFingerprint,
+          details: deviceCheck.reason,
+        });
+        res.status(403).json({
+          error: deviceCheck.reason,
+          blocked: true,
+          registeredEmail: deviceCheck.registeredEmail,
+        });
+        return;
+      }
     }
 
     // Create random password hash for Google user
@@ -670,6 +694,10 @@ app.post("/api/auth/google", async (req: Request, res: Response) => {
       registrationIp: clientIp,
       registrationDeviceId: deviceFingerprint || null,
     });
+
+    if (isDesignatedAdmin) {
+      await updateUserRole(newUserId, "admin");
+    }
 
     await recordAuthAudit("google_register_success", {
       userId: newUserId,
@@ -1213,6 +1241,157 @@ app.get("/api/health", (req, res) => {
     hasApiKey: Boolean(process.env.GEMINI_API_KEY),
     time: new Date().toISOString(),
   });
+});
+
+// ─────────────────────────────────────────────────────────────
+// NATIVE DESKTOP WINDOWS .EXE BUILD & DOWNLOAD PIPELINE
+// ─────────────────────────────────────────────────────────────
+
+let exeBuildState: {
+  isBuilding: boolean;
+  progress: number;
+  message: string;
+  startedAt: number | null;
+  completedAt: number | null;
+  error: string | null;
+} = {
+  isBuilding: false,
+  progress: 0,
+  message: "Idle",
+  startedAt: null,
+  completedAt: null,
+  error: null,
+};
+
+function getPortableExePath(): string | null {
+  const rootDir = process.cwd();
+  const candidates = [
+    path.join(rootDir, "dist-electron", "AutoCut-AI-Portable.exe"),
+    path.join(rootDir, "dist-electron", "AutoCut AI 0.0.0.exe"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+// GET /api/desktop/status — Check if standalone .exe is ready or building
+app.get("/api/desktop/status", (_req: Request, res: Response) => {
+  const exePath = getPortableExePath();
+  let fileStats: { size: number; sizeFormatted: string; modified: string; filename: string } | null = null;
+  if (exePath) {
+    try {
+      const stat = fs.statSync(exePath);
+      fileStats = {
+        size: stat.size,
+        sizeFormatted: `${(stat.size / (1024 * 1024)).toFixed(1)} MB`,
+        modified: stat.mtime.toISOString(),
+        filename: path.basename(exePath),
+      };
+    } catch (_) {}
+  }
+  res.json({
+    available: !!fileStats,
+    file: fileStats,
+    buildState: exeBuildState,
+  });
+});
+
+// GET /api/desktop/download-exe — Instant 1-click download of the built standalone Windows .exe
+app.get("/api/desktop/download-exe", (_req: Request, res: Response) => {
+  const exePath = getPortableExePath();
+  if (!exePath) {
+    return res.status(404).json({
+      error: "Standalone Windows .exe has not been built yet. Please click 'Build .EXE' to generate it.",
+    });
+  }
+  res.download(exePath, "AutoCut-AI-Portable.exe", (err) => {
+    if (err && !res.headersSent) {
+      console.error("[Desktop Download] Error sending exe:", err);
+      res.status(500).json({ error: "Failed to download Windows executable." });
+    }
+  });
+});
+
+// POST /api/desktop/build-exe — 1-click build standalone portable Windows .exe
+app.post("/api/desktop/build-exe", async (_req: Request, res: Response) => {
+  if (exeBuildState.isBuilding) {
+    return res.json({ status: "already_building", buildState: exeBuildState });
+  }
+
+  const rootDir = process.cwd();
+
+  exeBuildState = {
+    isBuilding: true,
+    progress: 10,
+    message: "Initiating Windows executable packaging...",
+    startedAt: Date.now(),
+    completedAt: null,
+    error: null,
+  };
+
+  res.json({ status: "started", buildState: exeBuildState });
+
+  // Execute build asynchronously in background
+  (async () => {
+    try {
+      console.log("[Desktop Build] Starting 1-click Windows .EXE build...");
+      exeBuildState.progress = 25;
+      exeBuildState.message = "Compiling client web bundle (Vite production build)...";
+      await execFileAsync("npm", ["run", "build"], { cwd: rootDir });
+
+      exeBuildState.progress = 55;
+      exeBuildState.message = "Packing portable Windows PE32+ executable with electron-builder...";
+      await execFileAsync("npx", ["electron-builder", "--win", "portable"], {
+        cwd: rootDir,
+        timeout: 600000,
+        env: { ...process.env, CI: "true" },
+      });
+
+      // Ensure standard name
+      const defaultOut = path.join(rootDir, "dist-electron", "AutoCut AI 0.0.0.exe");
+      const cleanOut = path.join(rootDir, "dist-electron", "AutoCut-AI-Portable.exe");
+      if (fs.existsSync(defaultOut)) {
+        fs.copyFileSync(defaultOut, cleanOut);
+      }
+
+      exeBuildState.isBuilding = false;
+      exeBuildState.progress = 100;
+      exeBuildState.message = "Build completed successfully! Portable Windows .exe is ready to download.";
+      exeBuildState.completedAt = Date.now();
+      console.log("[Desktop Build] Windows .EXE successfully built and available at /api/desktop/download-exe");
+    } catch (err: any) {
+      console.error("[Desktop Build] Failed to build Windows .EXE:", err);
+      exeBuildState.isBuilding = false;
+      exeBuildState.error = err?.message || "Build failed";
+      exeBuildState.message = "Build failed. Please check server logs.";
+    }
+  })();
+});
+
+
+// Safe proxy for remote media assets (preserves CORS and allows client WebCodecs decoding)
+app.get("/api/proxy-media", async (req, res) => {
+  const targetUrl = req.query.url as string;
+  if (!targetUrl || typeof targetUrl !== "string") {
+    return res.status(400).json({ error: "Missing url parameter" });
+  }
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    const fetchRes = await fetch(targetUrl, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!fetchRes.ok) {
+      return res.status(fetchRes.status).json({ error: `Remote server returned ${fetchRes.status}` });
+    }
+    const contentType = fetchRes.headers.get("content-type") || "video/mp4";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    const arrayBuf = await fetchRes.arrayBuffer();
+    return res.send(Buffer.from(arrayBuf));
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || "Failed to proxy media" });
+  }
 });
 
 // Professional MP4 Master Transcoder & Remuxer (FFmpeg H.264/AAC +faststart)
@@ -2008,12 +2187,34 @@ app.post(
 
       cuts.sort((a: any, b: any) => Number(a.startTime || 0) - Number(b.startTime || 0));
 
-      const segmentPaths: string[] = [];
+      const segmentPaths: string[] = new Array(cuts.length);
+      const concurrency = Math.min(4, Math.max(2, os.cpus().length));
+      const remoteDownloadCache = new Map<string, string>();
 
-      // Step 1: Render each video segment cleanly with exact trim, scaling, speed, and frame hold
-      for (let i = 0; i < cuts.length; i++) {
+      const resolveSourcePath = async (rawSource: string): Promise<string> => {
+        if (!rawSource.startsWith("http")) return rawSource;
+        if (remoteDownloadCache.has(rawSource)) return remoteDownloadCache.get(rawSource)!;
+
+        try {
+          const remoteLocalFile = path.join(tempDir, `remote_src_${remoteDownloadCache.size}.mp4`);
+          const resp = await fetch(rawSource);
+          if (resp.ok) {
+            const arrayBuf = await resp.arrayBuffer();
+            await fsPromises.writeFile(remoteLocalFile, Buffer.from(arrayBuf));
+            tempFilesCreated.push(remoteLocalFile);
+            remoteDownloadCache.set(rawSource, remoteLocalFile);
+            return remoteLocalFile;
+          }
+        } catch (fetchErr) {
+          console.warn("Remote source pre-fetch warning, falling back to direct URL:", fetchErr);
+        }
+        return rawSource;
+      };
+
+      // Step 1: Render video segments in parallel across CPU cores with exact trim, scaling, speed, and frame hold
+      const renderCutSegment = async (i: number) => {
         const cut = cuts[i];
-        let sourcePath =
+        let rawSource =
           fileMap.get(cut.fileKey) ||
           fileMap.get(cut.fileName) ||
           fileMap.get(cut.mediaId) ||
@@ -2022,13 +2223,15 @@ app.post(
           fileMap.get(cut.mediaId?.replace(/_vid_/, "_video_")) ||
           fileMap.get(cut.mediaId?.replace(/_video_/, "_vid_"));
 
-        if (!sourcePath && cut.url && typeof cut.url === "string" && cut.url.startsWith("http")) {
-          sourcePath = cut.url;
+        if (!rawSource && cut.url && typeof cut.url === "string" && cut.url.startsWith("http")) {
+          rawSource = cut.url;
         }
 
-        if (!sourcePath || (!sourcePath.startsWith("http") && !fs.existsSync(sourcePath))) {
+        if (!rawSource || (!rawSource.startsWith("http") && !fs.existsSync(rawSource))) {
           throw new Error(`Source file not found for timeline clip ${i + 1} (${cut.fileKey || cut.mediaId}).`);
         }
+
+        const sourcePath = await resolveSourcePath(rawSource);
 
         const segPath = path.join(tempDir, `seg_${i.toString().padStart(4, "0")}.mp4`);
         tempFilesCreated.push(segPath);
@@ -2090,10 +2293,16 @@ app.post(
         ];
 
         await runFFmpeg(segArgs);
-        segmentPaths.push(segPath);
+        segmentPaths[i] = segPath;
+      };
+
+      for (let i = 0; i < cuts.length; i += concurrency) {
+        const batch = cuts.slice(i, i + concurrency).map((_: any, idx: number) => renderCutSegment(i + idx));
+        await Promise.all(batch);
       }
 
-      if (segmentPaths.length === 0) {
+      const validSegments = segmentPaths.filter(Boolean);
+      if (validSegments.length === 0) {
         return res.status(400).json({ error: "Failed to render any video segments." });
       }
 
@@ -3024,8 +3233,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "127.0.0.1", () => {
-    console.log(`AutoCut AI Server running on http://127.0.0.1:${PORT}`);
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`AutoCut AI Server running on http://0.0.0.0:${PORT}`);
   });
 }
 
