@@ -289,7 +289,7 @@ export const ProjectsPage: React.FC = () => {
               Project Library
             </h1>
             <p className="text-zinc-400 text-sm mt-1">
-              Manage your video timeline projects, create new cuts, and import archives.
+              Manage your globally synced timeline projects across all devices, create new cuts, and import archives.
             </p>
           </div>
 
@@ -415,6 +415,13 @@ export const ProjectsPage: React.FC = () => {
                           </span>
                         </div>
                       )}
+
+                      <div className="absolute top-2 left-2 bg-zinc-950/85 backdrop-blur-sm border border-zinc-800 rounded px-1.5 py-0.5 text-[10px] font-medium flex items-center gap-1">
+                        <span className={`w-1.5 h-1.5 rounded-full ${p.syncOrigin === "cloud" || p.syncOrigin === "synced" ? "bg-emerald-400" : "bg-amber-400"}`} />
+                        <span className="text-zinc-300">
+                          {p.syncOrigin === "synced" ? "Cloud + Device" : p.syncOrigin === "cloud" ? "Cloud Synced" : "This Device"}
+                        </span>
+                      </div>
 
                       <div className="absolute top-2 right-2 bg-zinc-950/80 backdrop-blur-sm border border-zinc-800 rounded px-1.5 py-0.5 text-[10px] text-zinc-300 font-mono">
                         {p.mediaCount} assets

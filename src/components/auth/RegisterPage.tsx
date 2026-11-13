@@ -20,6 +20,7 @@ import {
 import { useAuth } from "../../context/AuthContext";
 import { GoogleAuthButton } from "./GoogleAuthButton";
 import { getDeviceFingerprint } from "../../utils/fingerprint";
+import { authFetch } from "../../utils/authClient";
 
 interface RegisterPageProps {
   onSwitchToLogin?: () => void;
@@ -96,7 +97,7 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({ onSwitchToLogin }) =
     const checkDevice = async () => {
       try {
         const fp = getDeviceFingerprint();
-        const res = await fetch("/api/auth/device-check", {
+        const res = await authFetch("/api/auth/device-check", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ deviceFingerprint: fp }),
@@ -196,7 +197,14 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({ onSwitchToLogin }) =
     setSendingCode(false);
 
     if (res.success) {
-      setSuccessNotice(`Verification code sent to ${email.trim()}. Please check your inbox.`);
+      if (res.desktopMode && res.desktopVerificationCode) {
+        setVerificationCode(res.desktopVerificationCode);
+        setSuccessNotice(
+          `Desktop App Local Backend active. Your studio confirmation code is ${res.desktopVerificationCode} (or use Google Sign-In for instant cloud sync across devices).`
+        );
+      } else {
+        setSuccessNotice(`Verification code sent to ${email.trim()}. Please check your inbox.`);
+      }
       setStep(2);
       setResendCooldown(30);
     } else {
@@ -214,7 +222,12 @@ export const RegisterPage: React.FC<RegisterPageProps> = ({ onSwitchToLogin }) =
     setSendingCode(false);
 
     if (res.success) {
-      setSuccessNotice(`A fresh verification code was sent to ${email.trim()}.`);
+      if (res.desktopMode && res.desktopVerificationCode) {
+        setVerificationCode(res.desktopVerificationCode);
+        setSuccessNotice(`Desktop verification code refreshed: ${res.desktopVerificationCode}`);
+      } else {
+        setSuccessNotice(`A fresh verification code was sent to ${email.trim()}.`);
+      }
       setResendCooldown(45);
     } else {
       setLocalError(res.error || "Failed to resend verification code.");

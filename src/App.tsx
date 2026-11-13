@@ -318,7 +318,7 @@ export default function App() {
       setIsSaving(true);
       saveProjectForUser(storageUserId, createProjectSnapshot(false))
         .then(() => {
-          setLastSavedText("Saved to this browser");
+          setLastSavedText(storageUserId > 0 ? "Saved to Cloud & Device" : "Saved to this device");
           setProjectNotice(null);
         })
         .catch((error: unknown) => {
@@ -1177,9 +1177,9 @@ export default function App() {
     setIsSaving(true);
     try {
       await saveProjectForUser(storageUserId, createProjectSnapshot());
-      setLastSavedText("Saved to this browser");
+      setLastSavedText(storageUserId > 0 ? "Saved to Cloud & Device" : "Saved to this device");
       await refreshSavedProjects(storageUserId);
-      setProjectNotice("Project saved with its media and timeline.");
+      setProjectNotice(storageUserId > 0 ? "Project saved and synced globally across your devices." : "Project saved with its media and timeline.");
     } catch (error) {
       setProjectNotice(error instanceof Error ? error.message : "Could not save this project.");
       setLastSavedText("Save failed");

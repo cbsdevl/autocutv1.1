@@ -1,0 +1,168 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Core Authentication & Authorization Helpers ──────────────────────
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email == 'nizeyimanaplacide2@gmail.com' &&
+         request.auth.token.email_verified == true)
+      );
+    }
+
+    function isValidId(id) {
+      return id is string &&
+        id.size() >= 1 &&
+        id.size() <= 128 &&
+        id.matches('^[a-zA-Z0-9_.-]+$') &&
+        !(id in ['.', '..', 'undefined', 'null']);
+    }
+
+    // ── Domain Validation Helpers ───────────────────────────────────────
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'displayName', 'photoUrl', 'planSlug', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 1024)) &&
+        (!('planSlug' in data) || (data.planSlug is string && data.planSlug.size() <= 40)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPrivateAccount(data) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'role', 'pgUserId', 'lastPlatform', 'updatedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.role in ['user', 'admin'] &&
+        (!('pgUserId' in data) || data.pgUserId is number) &&
+        (!('lastPlatform' in data) || (data.lastPlatform is string && data.lastPlatform.size() <= 40)) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidProjectDocument(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'name', 'mediaCount', 'snapshotJson', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'ownerUid', 'name', 'aspectRatio', 'resolution', 'frameRate',
+          'mediaCount', 'thumbnail', 'snapshotJson', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && isValidId(data.id) &&
+        data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 200 &&
+        (!('aspectRatio' in data) || (data.aspectRatio is string && data.aspectRatio.size() <= 20)) &&
+        (!('resolution' in data) || (data.resolution is string && data.resolution.size() <= 20)) &&
+        (!('frameRate' in data) || (data.frameRate is number && data.frameRate >= 1 && data.frameRate <= 240)) &&
+        data.mediaCount is number && data.mediaCount >= 0 && data.mediaCount <= 5000 &&
+        (!('thumbnail' in data) || (data.thumbnail is string && data.thumbnail.size() <= 250000)) &&
+        data.snapshotJson is string && data.snapshotJson.size() >= 2 && data.snapshotJson.size() <= 750000 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // ── Collection Rules ────────────────────────────────────────────────
+
+    // Boot-time connectivity check endpoint (read-only single doc, no PII)
+    match /test/connection {
+      allow get: if isAuthenticated();
+      allow list, write: if false;
+    }
+
+    // Admin registry (DBAC)
+    match /admins/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // User public profile + private subcollections
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(request.resource.data) &&
+        request.resource.data.uid == userId &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.updatedAt == request.time;
+
+      allow update: if isOwner(userId) &&
+        isValidUserProfile(request.resource.data) &&
+        request.resource.data.uid == resource.data.uid &&
+        request.resource.data.createdAt == resource.data.createdAt &&
+        request.resource.data.updatedAt == request.time &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'displayName', 'photoUrl', 'planSlug', 'updatedAt'
+        ]);
+
+      allow delete: if isAdmin();
+
+      // Private PII account metadata
+      match /private/{docId} {
+        allow get: if (docId == 'account') && (isOwner(userId) || isAdmin());
+        allow list: if false;
+
+        allow create: if docId == 'account' &&
+          isOwner(userId) &&
+          isValidPrivateAccount(request.resource.data) &&
+          request.resource.data.uid == userId &&
+          request.resource.data.role == 'user' &&
+          request.resource.data.updatedAt == request.time;
+
+        allow update: if docId == 'account' &&
+          (isOwner(userId) || isAdmin()) &&
+          isValidPrivateAccount(request.resource.data) &&
+          request.resource.data.uid == resource.data.uid &&
+          (isAdmin() || request.resource.data.role == resource.data.role) &&
+          request.resource.data.updatedAt == request.time &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'email', 'pgUserId', 'lastPlatform', 'updatedAt'
+          ]);
+
+        allow delete: if isAdmin();
+      }
+
+      // User's global cross-device projects
+      match /projects/{projectId} {
+        allow get: if isOwner(userId) || isAdmin();
+        allow list: if (isOwner(userId) && resource.data.ownerUid == request.auth.uid) || isAdmin();
+
+        allow create: if isOwner(userId) &&
+          isValidId(projectId) &&
+          isValidProjectDocument(request.resource.data) &&
+          request.resource.data.id == projectId &&
+          request.resource.data.ownerUid == userId &&
+          request.resource.data.createdAt == request.time &&
+          request.resource.data.updatedAt == request.time;
+
+        allow update: if isOwner(userId) &&
+          isValidProjectDocument(request.resource.data) &&
+          request.resource.data.id == resource.data.id &&
+          request.resource.data.ownerUid == resource.data.ownerUid &&
+          request.resource.data.createdAt == resource.data.createdAt &&
+          request.resource.data.updatedAt == request.time &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'aspectRatio', 'resolution', 'frameRate',
+            'mediaCount', 'thumbnail', 'snapshotJson', 'updatedAt'
+          ]);
+
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+    }
+
+    // Default global deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

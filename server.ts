@@ -47,6 +47,10 @@ import {
   updateTicketStatus,
   getAllSupportTickets,
   getSupportStats,
+  upsertCloudProject,
+  listCloudProjectsByUser,
+  getCloudProjectByUser,
+  deleteCloudProjectByUser,
   default as db,
 } from "./src/db/database.js";
 import { validateRealEmail, validatePasswordSecurity } from "./src/utils/emailValidator.js";
@@ -737,6 +741,99 @@ app.get("/api/auth/me", requireAuth, (req: Request, res: Response) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// GLOBAL CROSS-DEVICE CLOUD PROJECT ROUTES
+// ─────────────────────────────────────────────────────────────
+
+// GET /api/projects — list all cloud projects for current user
+app.get("/api/projects", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user.id;
+    const projects = await listCloudProjectsByUser(userId);
+    res.json({ projects });
+  } catch (err) {
+    console.error("[Projects] List error:", err);
+    res.status(500).json({ error: "Failed to fetch cloud projects." });
+  }
+});
+
+// GET /api/projects/:projectId — load full project snapshot from cloud DB
+app.get("/api/projects/:projectId", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user.id;
+    const projectId = String(req.params.projectId || "").trim();
+    if (!projectId) {
+      res.status(400).json({ error: "Invalid project ID." });
+      return;
+    }
+    const project = await getCloudProjectByUser(userId, projectId);
+    if (!project) {
+      res.status(404).json({ error: "Project not found." });
+      return;
+    }
+    res.json({ project });
+  } catch (err) {
+    console.error("[Projects] Get error:", err);
+    res.status(500).json({ error: "Failed to load cloud project." });
+  }
+});
+
+// POST /api/projects — upsert project snapshot to global PostgreSQL DB
+app.post("/api/projects", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user.id;
+    const {
+      projectId,
+      name,
+      aspectRatio,
+      resolution,
+      frameRate,
+      mediaCount,
+      thumbnail,
+      snapshotJson,
+    } = req.body || {};
+
+    if (!projectId || typeof projectId !== "string" || !snapshotJson || typeof snapshotJson !== "string") {
+      res.status(400).json({ error: "projectId and snapshotJson are required." });
+      return;
+    }
+
+    const saved = await upsertCloudProject({
+      userId,
+      projectId: projectId.slice(0, 128),
+      name: typeof name === "string" && name.trim() ? name.trim().slice(0, 200) : "Untitled Project",
+      aspectRatio: typeof aspectRatio === "string" ? aspectRatio.slice(0, 20) : "16:9",
+      resolution: typeof resolution === "string" ? resolution.slice(0, 20) : "1080p",
+      frameRate: typeof frameRate === "number" ? frameRate : 30,
+      mediaCount: typeof mediaCount === "number" ? mediaCount : 0,
+      thumbnail: typeof thumbnail === "string" ? thumbnail.slice(0, 300000) : null,
+      snapshotJson,
+    });
+
+    res.json({ ok: true, project: saved });
+  } catch (err) {
+    console.error("[Projects] Save error:", err);
+    res.status(500).json({ error: "Failed to save cloud project." });
+  }
+});
+
+// DELETE /api/projects/:projectId — delete cloud project
+app.delete("/api/projects/:projectId", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user.id;
+    const projectId = String(req.params.projectId || "").trim();
+    if (!projectId) {
+      res.status(400).json({ error: "Invalid project ID." });
+      return;
+    }
+    await deleteCloudProjectByUser(userId, projectId);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[Projects] Delete error:", err);
+    res.status(500).json({ error: "Failed to delete cloud project." });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // PRICING / SUBSCRIPTION ROUTES
 // ─────────────────────────────────────────────────────────────
 
@@ -1263,6 +1360,23 @@ let exeBuildState: {
   error: null,
 };
 
+function getSetupExePath(): string | null {
+  const rootDir = process.cwd();
+  const candidates = [
+    path.join(rootDir, "dist-electron", "AutoCut-AI-Setup.exe"),
+    path.join(rootDir, "dist-electron", "AutoCut AI Setup 0.0.0.exe"),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      try {
+        const stat = fs.statSync(p);
+        if (stat.size > 50 * 1024 * 1024) return p;
+      } catch (_) {}
+    }
+  }
+  return null;
+}
+
 function getPortableExePath(): string | null {
   const rootDir = process.cwd();
   const candidates = [
@@ -1270,50 +1384,103 @@ function getPortableExePath(): string | null {
     path.join(rootDir, "dist-electron", "AutoCut AI 0.0.0.exe"),
   ];
   for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
+    if (fs.existsSync(p)) {
+      try {
+        const stat = fs.statSync(p);
+        if (stat.size > 50 * 1024 * 1024) return p;
+      } catch (_) {}
+    }
   }
   return null;
 }
 
-// GET /api/desktop/status — Check if standalone .exe is ready or building
+// GET /api/desktop/status — Check if setup installer & portable .exe are ready or building
 app.get("/api/desktop/status", (_req: Request, res: Response) => {
-  const exePath = getPortableExePath();
-  let fileStats: { size: number; sizeFormatted: string; modified: string; filename: string } | null = null;
-  if (exePath) {
+  const getStats = (p: string | null) => {
+    if (!p) return null;
     try {
-      const stat = fs.statSync(exePath);
-      fileStats = {
+      const stat = fs.statSync(p);
+      return {
         size: stat.size,
         sizeFormatted: `${(stat.size / (1024 * 1024)).toFixed(1)} MB`,
         modified: stat.mtime.toISOString(),
-        filename: path.basename(exePath),
+        filename: path.basename(p),
       };
-    } catch (_) {}
-  }
+    } catch {
+      return null;
+    }
+  };
+
+  const setupFile = getStats(getSetupExePath());
+  const portableFile = getStats(getPortableExePath());
+
   res.json({
-    available: !!fileStats,
-    file: fileStats,
+    available: !!setupFile || !!portableFile,
+    setup: setupFile,
+    portable: portableFile,
+    file: setupFile || portableFile,
     buildState: exeBuildState,
   });
 });
 
-// GET /api/desktop/download-exe — Instant 1-click download of the built standalone Windows .exe
-app.get("/api/desktop/download-exe", (_req: Request, res: Response) => {
-  const exePath = getPortableExePath();
-  if (!exePath) {
+// GET /api/desktop/download-exe — Resilient chunked streaming download of setup or portable .exe
+app.get("/api/desktop/download-exe", (req: Request, res: Response) => {
+  const requestedType = req.query.type === "portable" ? "portable" : "setup";
+  const exePath = requestedType === "portable" ? getPortableExePath() : getSetupExePath();
+
+  if (!exePath || !fs.existsSync(exePath)) {
     return res.status(404).json({
-      error: "Standalone Windows .exe has not been built yet. Please click 'Build .EXE' to generate it.",
+      error: `Windows ${requestedType === "setup" ? "Setup Installer" : "Portable App"} is not compiled yet. Please click 'Rebuild Fresh Installers' in the application.`,
+      status: "not_ready",
     });
   }
-  res.download(exePath, "AutoCut-AI-Portable.exe", (err) => {
-    if (err && !res.headersSent) {
-      console.error("[Desktop Download] Error sending exe:", err);
-      res.status(500).json({ error: "Failed to download Windows executable." });
+
+  const downloadFilename = requestedType === "setup" ? "AutoCut-AI-Setup.exe" : "AutoCut-AI-Portable.exe";
+
+  try {
+    const stat = fs.statSync(exePath);
+    const range = req.headers.range;
+
+    res.setHeader("Content-Type", "application/vnd.microsoft.portable-executable");
+    res.setHeader("Content-Disposition", `attachment; filename="${downloadFilename}"`);
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "no-cache");
+
+    if (range) {
+      const parts = range.replace(/bytes=/, "").split("-");
+      const start = parseInt(parts[0], 10);
+      const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+      const chunkSize = end - start + 1;
+
+      res.writeHead(206, {
+        "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+        "Content-Length": chunkSize,
+      });
+
+      const fileStream = fs.createReadStream(exePath, { start, end });
+      fileStream.pipe(res);
+      fileStream.on("error", (err) => {
+        console.error("[Desktop Stream Range Error]:", err);
+        if (!res.headersSent) res.status(500).end();
+      });
+    } else {
+      res.setHeader("Content-Length", stat.size);
+      const fileStream = fs.createReadStream(exePath);
+      fileStream.pipe(res);
+      fileStream.on("error", (err) => {
+        console.error("[Desktop Stream Error]:", err);
+        if (!res.headersSent) res.status(500).end();
+      });
     }
-  });
+  } catch (err: any) {
+    console.error("[Desktop Download Handler Error]:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Failed to download Windows executable. Please try again." });
+    }
+  }
 });
 
-// POST /api/desktop/build-exe — 1-click build standalone portable Windows .exe
+// POST /api/desktop/build-exe — 1-click build Windows Setup Installer & Portable .exe
 app.post("/api/desktop/build-exe", async (_req: Request, res: Response) => {
   if (exeBuildState.isBuilding) {
     return res.json({ status: "already_building", buildState: exeBuildState });
@@ -1324,7 +1491,7 @@ app.post("/api/desktop/build-exe", async (_req: Request, res: Response) => {
   exeBuildState = {
     isBuilding: true,
     progress: 10,
-    message: "Initiating Windows executable packaging...",
+    message: "Initiating Windows Setup Installer & Portable packaging...",
     startedAt: Date.now(),
     completedAt: null,
     error: null,
@@ -1335,31 +1502,24 @@ app.post("/api/desktop/build-exe", async (_req: Request, res: Response) => {
   // Execute build asynchronously in background
   (async () => {
     try {
-      console.log("[Desktop Build] Starting 1-click Windows .EXE build...");
+      console.log("[Desktop Build] Starting 1-click Windows Setup + Portable .EXE build...");
       exeBuildState.progress = 25;
       exeBuildState.message = "Compiling client web bundle (Vite production build)...";
       await execFileAsync("npm", ["run", "build"], { cwd: rootDir });
 
       exeBuildState.progress = 55;
-      exeBuildState.message = "Packing portable Windows PE32+ executable with electron-builder...";
-      await execFileAsync("npx", ["electron-builder", "--win", "portable"], {
+      exeBuildState.message = "Packaging real Windows NSIS Setup Installer & Portable .exe...";
+      await execFileAsync("node", ["scripts/build-windows.cjs", "nsis", "portable"], {
         cwd: rootDir,
-        timeout: 600000,
+        timeout: 900000,
         env: { ...process.env, CI: "true" },
       });
 
-      // Ensure standard name
-      const defaultOut = path.join(rootDir, "dist-electron", "AutoCut AI 0.0.0.exe");
-      const cleanOut = path.join(rootDir, "dist-electron", "AutoCut-AI-Portable.exe");
-      if (fs.existsSync(defaultOut)) {
-        fs.copyFileSync(defaultOut, cleanOut);
-      }
-
       exeBuildState.isBuilding = false;
       exeBuildState.progress = 100;
-      exeBuildState.message = "Build completed successfully! Portable Windows .exe is ready to download.";
+      exeBuildState.message = "Build completed! Windows Setup Installer and Portable .exe are ready to download.";
       exeBuildState.completedAt = Date.now();
-      console.log("[Desktop Build] Windows .EXE successfully built and available at /api/desktop/download-exe");
+      console.log("[Desktop Build] Windows Setup & Portable .EXE successfully built.");
     } catch (err: any) {
       console.error("[Desktop Build] Failed to build Windows .EXE:", err);
       exeBuildState.isBuilding = false;

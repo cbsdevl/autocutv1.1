@@ -1,0 +1,80 @@
+{
+  "entities": {
+    "UserPublicProfile": {
+      "title": "UserPublicProfile",
+      "description": "Publicly readable creator profile information without PII.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID of the user." },
+        "displayName": { "type": "string", "description": "Creator display name." },
+        "photoUrl": { "type": "string", "description": "Avatar URL." },
+        "planSlug": { "type": "string", "description": "Active subscription tier slug." },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "createdAt", "updatedAt"]
+    },
+    "UserPrivateAccount": {
+      "title": "UserPrivateAccount",
+      "description": "Private user account metadata including email PII and desktop sync preferences.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Owner Firebase Auth UID." },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["user", "admin"] },
+        "pgUserId": { "type": "number", "description": "Associated PostgreSQL user ID if linked." },
+        "lastPlatform": { "type": "string", "description": "Last synced client platform (web or desktop-exe)." },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role", "updatedAt"]
+    },
+    "ProjectDocument": {
+      "title": "ProjectDocument",
+      "description": "Global cross-device timeline project synchronized between Web and Windows Desktop App.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique project identifier." },
+        "ownerUid": { "type": "string", "description": "Firebase Auth UID of project owner." },
+        "name": { "type": "string", "description": "Project title." },
+        "aspectRatio": { "type": "string" },
+        "resolution": { "type": "string" },
+        "frameRate": { "type": "number" },
+        "mediaCount": { "type": "number" },
+        "thumbnail": { "type": "string", "description": "Compressed data URI preview thumbnail." },
+        "snapshotJson": { "type": "string", "description": "Serialized ProjectSnapshot JSON without raw binary blobs." },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerUid", "name", "mediaCount", "snapshotJson", "createdAt", "updatedAt"]
+    },
+    "AdminEntry": {
+      "title": "AdminEntry",
+      "description": "Server/admin role grant entry in /admins/{userId}.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "grantedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "grantedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserPublicProfile" },
+      "description": "Public user profile keyed by Firebase Auth UID."
+    },
+    "/users/{userId}/private/account": {
+      "schema": { "$ref": "#/entities/UserPrivateAccount" },
+      "description": "Private PII and subscription link owned strictly by userId."
+    },
+    "/users/{userId}/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/ProjectDocument" },
+      "description": "User's global video editing projects synced across Web and Desktop .exe."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminEntry" },
+      "description": "DBAC admin membership collection."
+    }
+  }
+}

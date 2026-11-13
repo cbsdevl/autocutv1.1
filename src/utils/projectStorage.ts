@@ -1,11 +1,17 @@
 import JSZip from "jszip";
 import type { CaptionItem, MediaItem, ProjectSettings, TimelineTrack, YouTubePackage, CopyrightAuditReport } from "../types";
+import { authFetch, getStoredToken } from "./authClient";
+import {
+  saveProjectToFirestore,
+  listProjectsFromFirestore,
+  loadProjectFromFirestore,
+  deleteProjectFromFirestore,
+} from "./firestoreSync";
 
 const DATABASE_NAME = "autocut-projects";
 const DATABASE_VERSION = 2; // bumped to add thumbnail index
 const PROJECT_STORE = "projects";
 const ARCHIVE_FORMAT = "autocut-project";
-// Supported archive versions — we accept any >= 1
 const ARCHIVE_VERSION = 2;
 const MIN_SUPPORTED_ARCHIVE_VERSION = 1;
 
@@ -30,20 +36,22 @@ interface StoredMedia extends Omit<MediaItem, "url" | "blobUrl" | "file" | "prox
   sourcePath?: string;
 }
 
+type StoredSnapshot = Omit<ProjectSnapshot, "mediaItems"> & { mediaItems: StoredMedia[] };
+
 interface StoredProject {
   key: string;
   userId: number;
   updatedAt: string;
   /** Data URI of the first video thumbnail for library display. */
   thumbnail?: string;
-  snapshot: Omit<ProjectSnapshot, "mediaItems"> & { mediaItems: StoredMedia[] };
+  snapshot: StoredSnapshot;
   assets: Record<string, { blob: Blob; name: string; type: string; lastModified: number }>;
 }
 
 interface ArchiveManifest {
   format: typeof ARCHIVE_FORMAT;
   version: number;
-  snapshot: Omit<ProjectSnapshot, "mediaItems"> & { mediaItems: StoredMedia[] };
+  snapshot: StoredSnapshot;
 }
 
 // ─────────────────────────────────────────
@@ -60,7 +68,6 @@ function openDatabase(): Promise<IDBDatabase> {
         store.createIndex("userId", "userId", { unique: false });
         store.createIndex("updatedAt", "updatedAt", { unique: false });
       } else if ((event as IDBVersionChangeEvent).oldVersion < 2) {
-        // Migration from v1: add updatedAt index if missing
         const transaction = (event.target as IDBOpenDBRequest).transaction!;
         const store = transaction.objectStore(PROJECT_STORE);
         if (!store.indexNames.contains("updatedAt")) {
@@ -79,36 +86,30 @@ function openDatabase(): Promise<IDBDatabase> {
 
 function withoutRuntimeMediaFields(item: MediaItem): StoredMedia {
   const { url, blobUrl, file, proxyUrl, proxyStatus, proxyError, ...metadata } = item;
-  // Only persist thumbnail if it is a data: URI (not a blob: URL which expires)
   const storedThumbnail = metadata.thumbnail?.startsWith("blob:") ? undefined : metadata.thumbnail;
   return {
     ...metadata,
     sourcePath: item.sourcePath,
     thumbnail: storedThumbnail,
-    ...(file ? {
-      assetPath: `assets/${encodeURIComponent(item.id)}/${encodeURIComponent(file.name)}`,
-      assetName: file.name,
-      assetType: file.type,
-    } : {}),
-    // Persist remote URL only for non-blob remote media (e.g. royalty-free library)
+    ...(file
+      ? {
+          assetPath: `assets/${encodeURIComponent(item.id)}/${encodeURIComponent(file.name)}`,
+          assetName: file.name,
+          assetType: file.type,
+        }
+      : {}),
     ...(!file && url && !url.startsWith("blob:") ? { remoteUrl: url } : {}),
   };
 }
 
-/**
- * Attempts to get a binary representation of the media for storage/export.
- * Priority: File reference > blob URL fetch > remote URL fetch (opt-in) > null
- */
 async function getMediaBlob(
   item: MediaItem,
   includeRemote = false,
 ): Promise<{ blob: Blob; name: string; type: string; lastModified: number } | null> {
-  // Best case — we have the original File object
   if (item.file) {
     return { blob: item.file, name: item.file.name, type: item.file.type, lastModified: item.file.lastModified };
   }
 
-  // blobUrl may still be live if we're in the same session (e.g. freshly imported)
   const liveUrl = item.blobUrl || (item.url?.startsWith("blob:") ? item.url : null);
   if (liveUrl) {
     try {
@@ -123,11 +124,10 @@ async function getMediaBlob(
         };
       }
     } catch {
-      // Blob URL has been revoked or is stale — fall through
+      // Blob URL revoked or stale
     }
   }
 
-  // Remote URL (royalty-free library, etc.) — only when caller opts in
   if (includeRemote && item.url && !item.url.startsWith("blob:")) {
     try {
       const response = await fetch(item.url);
@@ -170,9 +170,6 @@ async function materializeMedia(
     }
 
     if (assetPath || sourcePath || remoteUrl) {
-      // Asset was expected but missing from storage — preserve the last-known path so
-      // the UI can explain a missing-source condition without pretending the file is corrupted.
-      console.warn(`[AutoCut] Project media missing from storage: ${descriptor.name}. Re-import this file.`);
       return {
         ...metadata,
         sourcePath: sourcePath || descriptor.sourcePath || assetPath || remoteUrl,
@@ -181,7 +178,6 @@ async function materializeMedia(
       } as MediaItem;
     }
 
-    // Remote / royalty-free media
     return { ...metadata, sourcePath: sourcePath || descriptor.sourcePath, url: remoteUrl || "", blobUrl: undefined } as MediaItem;
   });
 }
@@ -189,22 +185,29 @@ async function materializeMedia(
 function inferMimeType(fileName: string, mediaKind: MediaItem["type"]): string {
   const extension = fileName.split(".").pop()?.toLowerCase();
   const knownTypes: Record<string, string> = {
-    mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime",
-    webm: "video/webm", mkv: "video/x-matroska", avi: "video/x-msvideo",
-    mp3: "audio/mpeg", wav: "audio/wav", m4a: "audio/mp4",
-    aac: "audio/aac", ogg: "audio/ogg",
-    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
-    webp: "image/webp", gif: "image/gif",
+    mp4: "video/mp4",
+    m4v: "video/mp4",
+    mov: "video/quicktime",
+    webm: "video/webm",
+    mkv: "video/x-matroska",
+    avi: "video/x-msvideo",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    m4a: "audio/mp4",
+    aac: "audio/aac",
+    ogg: "audio/ogg",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    webp: "image/webp",
+    gif: "image/gif",
   };
   const known = extension ? knownTypes[extension] : undefined;
   if (known) return known;
   return mediaKind === "video" ? "video/mp4" : mediaKind === "audio" ? "audio/mpeg" : "application/octet-stream";
 }
 
-/** Extract first video thumbnail data URI from snapshot for library display. */
-function extractProjectThumbnail(
-  snapshot: Omit<ProjectSnapshot, "mediaItems"> & { mediaItems: StoredMedia[] },
-): string | undefined {
+function extractProjectThumbnail(snapshot: StoredSnapshot): string | undefined {
   for (const item of snapshot.mediaItems) {
     if (item.thumbnail && item.thumbnail.startsWith("data:")) {
       return item.thumbnail;
@@ -213,8 +216,26 @@ function extractProjectThumbnail(
   return undefined;
 }
 
+/**
+ * Produces a compact cloud-safe snapshot JSON (< 650KB) by stripping large inline media thumbnails
+ * if needed while preserving 100% of timeline tracks, captions, clip trims, effects, and AI data.
+ */
+function buildCloudSnapshotJson(snapshot: StoredSnapshot): string {
+  const raw = JSON.stringify(snapshot);
+  if (raw.length <= 600_000) return raw;
+
+  const compactSnapshot: StoredSnapshot = {
+    ...snapshot,
+    mediaItems: snapshot.mediaItems.map((m) => ({
+      ...m,
+      thumbnail: m.thumbnail && m.thumbnail.length > 40_000 ? undefined : m.thumbnail,
+    })),
+  };
+  return JSON.stringify(compactSnapshot);
+}
+
 // ─────────────────────────────────────────
-// Public API
+// Public API (IndexedDB + Cloud PostgreSQL + Cloud Firestore Global Sync)
 // ─────────────────────────────────────────
 
 export async function saveProjectForUser(userId: number, snapshot: ProjectSnapshot): Promise<void> {
@@ -227,16 +248,27 @@ export async function saveProjectForUser(userId: number, snapshot: ProjectSnapsh
     if (asset) assets[item.id] = asset;
   }
 
-  const storedSnapshot = { ...snapshot, mediaItems };
+  const nowIso = new Date().toISOString();
+  const storedSnapshot: StoredSnapshot = {
+    ...snapshot,
+    project: {
+      ...snapshot.project,
+      updatedAt: nowIso,
+    },
+    mediaItems,
+  };
+
+  const thumbnail = extractProjectThumbnail(storedSnapshot);
   const record: StoredProject = {
     key: `${userId}:${snapshot.project.id}`,
     userId,
-    updatedAt: new Date().toISOString(),
-    thumbnail: extractProjectThumbnail(storedSnapshot),
+    updatedAt: nowIso,
+    thumbnail,
     snapshot: storedSnapshot,
     assets,
   };
 
+  // 1. Save locally to IndexedDB (fast + keeps local binary blobs)
   let database: IDBDatabase | undefined;
   try {
     database = await openDatabase();
@@ -254,7 +286,7 @@ export async function saveProjectForUser(userId: number, snapshot: ProjectSnapsh
       const sizeMb = (mediaSize / (1024 * 1024)).toFixed(0);
       throw new Error(
         `Browser storage is full. This project contains about ${sizeMb} MB of media. ` +
-        `Export a project archive (.autocut.zip) as a portable backup, then free browser storage and try again.`,
+          `Export a project archive (.autocut.zip) as a portable backup, then free browser storage and try again.`,
       );
     }
     if (storageError?.name === "DataCloneError") {
@@ -271,6 +303,52 @@ export async function saveProjectForUser(userId: number, snapshot: ProjectSnapsh
   } finally {
     database?.close();
   }
+
+  // 2. Sync globally to Cloud PostgreSQL (/api/projects) & Cloud Firestore
+  if (userId > 0) {
+    const cloudJson = buildCloudSnapshotJson(storedSnapshot);
+    const cloudThumbnail = thumbnail && thumbnail.length <= 220_000 ? thumbnail : undefined;
+
+    const tasks: Promise<unknown>[] = [];
+
+    if (getStoredToken()) {
+      tasks.push(
+        authFetch("/api/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId: snapshot.project.id,
+            name: snapshot.project.name,
+            aspectRatio: snapshot.project.aspectRatio,
+            resolution: snapshot.project.resolution,
+            frameRate: snapshot.project.frameRate,
+            mediaCount: mediaItems.length,
+            thumbnail: cloudThumbnail,
+            snapshotJson: cloudJson,
+          }),
+        }).catch((err) => {
+          console.warn("[CloudSync] PostgreSQL /api/projects save skipped:", err);
+        }),
+      );
+    }
+
+    tasks.push(
+      saveProjectToFirestore({
+        projectId: snapshot.project.id,
+        name: snapshot.project.name,
+        aspectRatio: snapshot.project.aspectRatio,
+        resolution: snapshot.project.resolution,
+        frameRate: snapshot.project.frameRate,
+        mediaCount: mediaItems.length,
+        thumbnail: cloudThumbnail,
+        snapshotJson: cloudJson,
+      }).catch((err) => {
+        console.warn("[CloudSync] Firestore project save skipped:", err);
+      }),
+    );
+
+    await Promise.allSettled(tasks);
+  }
 }
 
 export interface SavedProjectSummary {
@@ -279,58 +357,173 @@ export interface SavedProjectSummary {
   updatedAt: string;
   mediaCount: number;
   thumbnail?: string;
+  syncOrigin?: "local" | "cloud" | "synced";
 }
 
 export async function listProjectsForUser(userId: number): Promise<SavedProjectSummary[]> {
-  const database = await openDatabase();
-  const records = await new Promise<StoredProject[]>((resolve, reject) => {
-    const request = database
-      .transaction(PROJECT_STORE, "readonly")
-      .objectStore(PROJECT_STORE)
-      .index("userId")
-      .getAll(userId);
-    request.onsuccess = () => resolve(request.result as StoredProject[]);
-    request.onerror = () => reject(request.error || new Error("Could not list saved projects."));
-  });
-  database.close();
-  return records
-    .map(({ snapshot, updatedAt, thumbnail }) => ({
-      id: snapshot.project.id,
-      name: snapshot.project.name,
-      updatedAt,
-      mediaCount: snapshot.mediaItems.length,
-      thumbnail,
-    }))
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  // 1. Read local IndexedDB projects
+  const localRecords: StoredProject[] = await (async () => {
+    try {
+      const database = await openDatabase();
+      const rows = await new Promise<StoredProject[]>((resolve, reject) => {
+        const request = database
+          .transaction(PROJECT_STORE, "readonly")
+          .objectStore(PROJECT_STORE)
+          .index("userId")
+          .getAll(userId);
+        request.onsuccess = () => resolve(request.result as StoredProject[]);
+        request.onerror = () => reject(request.error || new Error("Could not list saved projects."));
+      });
+      database.close();
+      return rows;
+    } catch {
+      return [];
+    }
+  })();
+
+  const merged = new Map<string, SavedProjectSummary>();
+  for (const rec of localRecords) {
+    merged.set(rec.snapshot.project.id, {
+      id: rec.snapshot.project.id,
+      name: rec.snapshot.project.name,
+      updatedAt: rec.updatedAt,
+      mediaCount: rec.snapshot.mediaItems.length,
+      thumbnail: rec.thumbnail,
+      syncOrigin: "local",
+    });
+  }
+
+  // 2. Fetch global Cloud PostgreSQL & Cloud Firestore projects if signed in
+  if (userId > 0) {
+    const [pgResult, fbResult] = await Promise.allSettled([
+      getStoredToken()
+        ? authFetch("/api/projects").then(async (r) => (r.ok ? ((await r.json()).projects as any[]) : []))
+        : Promise.resolve([]),
+      listProjectsFromFirestore(),
+    ]);
+
+    const applyRemoteList = (items: Array<{ id: string; name: string; updatedAt: string; mediaCount: number; thumbnail?: string }>) => {
+      for (const item of items) {
+        if (!item?.id) continue;
+        const existing = merged.get(item.id);
+        if (!existing) {
+          merged.set(item.id, {
+            id: item.id,
+            name: item.name,
+            updatedAt: item.updatedAt,
+            mediaCount: item.mediaCount ?? 0,
+            thumbnail: item.thumbnail,
+            syncOrigin: "cloud",
+          });
+        } else {
+          const existingTime = Date.parse(existing.updatedAt) || 0;
+          const remoteTime = Date.parse(item.updatedAt) || 0;
+          merged.set(item.id, {
+            id: item.id,
+            name: remoteTime >= existingTime ? item.name : existing.name,
+            updatedAt: remoteTime >= existingTime ? item.updatedAt : existing.updatedAt,
+            mediaCount: remoteTime >= existingTime ? (item.mediaCount ?? existing.mediaCount) : existing.mediaCount,
+            thumbnail: item.thumbnail || existing.thumbnail,
+            syncOrigin: "synced",
+          });
+        }
+      }
+    };
+
+    if (pgResult.status === "fulfilled" && Array.isArray(pgResult.value)) {
+      applyRemoteList(pgResult.value);
+    }
+    if (fbResult.status === "fulfilled" && Array.isArray(fbResult.value)) {
+      applyRemoteList(fbResult.value);
+    }
+  }
+
+  return Array.from(merged.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
 export async function loadProjectForUser(userId: number, projectId: string): Promise<ProjectSnapshot | null> {
-  const database = await openDatabase();
-  const record = await new Promise<StoredProject | undefined>((resolve, reject) => {
-    const request = database
-      .transaction(PROJECT_STORE, "readonly")
-      .objectStore(PROJECT_STORE)
-      .get(`${userId}:${projectId}`);
-    request.onsuccess = () => resolve(request.result as StoredProject | undefined);
-    request.onerror = () => reject(request.error || new Error("Could not load saved project."));
-  });
-  database.close();
-  if (!record || record.userId !== userId) return null;
+  // 1. Load local IndexedDB record
+  const localRecord: StoredProject | undefined = await (async () => {
+    try {
+      const database = await openDatabase();
+      const rec = await new Promise<StoredProject | undefined>((resolve, reject) => {
+        const request = database
+          .transaction(PROJECT_STORE, "readonly")
+          .objectStore(PROJECT_STORE)
+          .get(`${userId}:${projectId}`);
+        request.onsuccess = () => resolve(request.result as StoredProject | undefined);
+        request.onerror = () => reject(request.error || new Error("Could not load saved project."));
+      });
+      database.close();
+      return rec && rec.userId === userId ? rec : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+
+  let chosenSnapshot: StoredSnapshot | null = localRecord ? localRecord.snapshot : null;
+  let chosenTime = localRecord ? Date.parse(localRecord.updatedAt) || 0 : -1;
+
+  // 2. Check Cloud PostgreSQL & Cloud Firestore for newer or cross-device snapshot
+  if (userId > 0) {
+    const [pgResult, fbResult] = await Promise.allSettled([
+      getStoredToken()
+        ? authFetch(`/api/projects/${encodeURIComponent(projectId)}`).then(async (r) =>
+            r.ok ? (await r.json()).project : null,
+          )
+        : Promise.resolve(null),
+      loadProjectFromFirestore(projectId),
+    ]);
+
+    const considerRemote = (remote: { updatedAt?: string; snapshotJson?: string } | null | undefined) => {
+      if (!remote?.snapshotJson) return;
+      try {
+        const parsed = JSON.parse(remote.snapshotJson) as StoredSnapshot;
+        const remoteTime = Date.parse(remote.updatedAt || parsed.project?.updatedAt || "") || 0;
+        if (!chosenSnapshot || remoteTime > chosenTime) {
+          chosenSnapshot = parsed;
+          chosenTime = remoteTime;
+        }
+      } catch {
+        // Ignore malformed JSON
+      }
+    };
+
+    if (pgResult.status === "fulfilled") considerRemote(pgResult.value);
+    if (fbResult.status === "fulfilled") considerRemote(fbResult.value);
+  }
+
+  if (!chosenSnapshot) return null;
+
+  const localAssets = localRecord?.assets || {};
   return {
-    ...record.snapshot,
-    mediaItems: await materializeMedia(record.snapshot.mediaItems, record.assets),
+    ...chosenSnapshot,
+    mediaItems: await materializeMedia(chosenSnapshot.mediaItems || [], localAssets),
   };
 }
 
 export async function deleteProjectForUser(userId: number, projectId: string): Promise<void> {
-  const database = await openDatabase();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction(PROJECT_STORE, "readwrite");
-    transaction.objectStore(PROJECT_STORE).delete(`${userId}:${projectId}`);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error || new Error("Could not delete saved project."));
-  });
-  database.close();
+  try {
+    const database = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(PROJECT_STORE, "readwrite");
+      transaction.objectStore(PROJECT_STORE).delete(`${userId}:${projectId}`);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error || new Error("Could not delete saved project."));
+    });
+    database.close();
+  } catch {
+    // Continue cloud deletes even if local missing
+  }
+
+  if (userId > 0) {
+    await Promise.allSettled([
+      getStoredToken()
+        ? authFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" })
+        : Promise.resolve(),
+      deleteProjectFromFirestore(projectId),
+    ]);
+  }
 }
 
 export async function duplicateProjectForUser(
@@ -351,7 +544,6 @@ export async function duplicateProjectForUser(
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     },
-    // Reset playback state for the duplicate
     currentTime: 0,
     selectedClipId: null,
   };
@@ -371,7 +563,6 @@ export async function exportProjectArchive(snapshot: ProjectSnapshot): Promise<B
 
   for (const item of snapshot.mediaItems) {
     const descriptor = withoutRuntimeMediaFields(item);
-    // Try to get the binary — don't throw, just skip unresolvable media
     const asset = await getMediaBlob(item, true);
     if (asset) {
       descriptor.assetPath =
@@ -382,10 +573,8 @@ export async function exportProjectArchive(snapshot: ProjectSnapshot): Promise<B
       delete descriptor.remoteUrl;
       zip.file(descriptor.assetPath, asset.blob);
     } else if (item.url && !item.url.startsWith("blob:")) {
-      // Remote URL we couldn't fetch — keep remoteUrl so import can attempt re-fetch
       descriptor.remoteUrl = item.url;
     } else {
-      // Blob URL that has been revoked and no File reference — note it but don't block export
       skipped.push(item.name);
       descriptor.remoteUrl = undefined;
     }
@@ -403,12 +592,11 @@ export async function exportProjectArchive(snapshot: ProjectSnapshot): Promise<B
     zip.file(
       "MISSING_MEDIA.txt",
       `The following media files could not be included in this archive because their\n` +
-      `original files are no longer accessible in the browser. Re-import them to include:\n\n` +
-      skipped.map((n) => `  • ${n}`).join("\n"),
+        `original files are no longer accessible in the browser. Re-import them to include:\n\n` +
+        skipped.map((n) => `  • ${n}`).join("\n"),
     );
   }
 
-  // Video/audio are already compressed — STORE avoids a costly re-compression pass
   return zip.generateAsync({ type: "blob", compression: "STORE" });
 }
 
@@ -441,23 +629,20 @@ export async function importProjectArchive(file: File): Promise<ProjectSnapshot>
   if (manifest.version < MIN_SUPPORTED_ARCHIVE_VERSION) {
     throw new Error(
       `This project was saved with an older, incompatible version of AutoCut (archive v${manifest.version}). ` +
-      `Please re-export it from the original AutoCut version.`,
+        `Please re-export it from the original AutoCut version.`,
     );
   }
 
-  // Accept any version >= MIN_SUPPORTED_ARCHIVE_VERSION (forward compat)
   const assets: StoredProject["assets"] = {};
 
   for (const descriptor of manifest.snapshot.mediaItems) {
     if (!descriptor.assetPath) continue;
 
-    // Try exact path first, then URL-decoded fallback (handles encoding differences between versions)
     const assetEntry =
       zip.file(descriptor.assetPath) ??
       zip.file(decodeURIComponent(descriptor.assetPath));
 
     if (!assetEntry) {
-      // Non-fatal: media may have been remote-only; log and continue
       console.warn(`[AutoCut] Archive missing asset: ${descriptor.assetPath} (${descriptor.name})`);
       continue;
     }

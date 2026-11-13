@@ -6,6 +6,7 @@ import {
   integer,
   doublePrecision,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 // ── Users Table ──────────────────────────
@@ -149,12 +150,44 @@ export const loginAttempts = pgTable('login_attempts', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+// ── Cloud Projects Table (Global Cross-Device Sync) ──
+export const cloudProjects = pgTable(
+  'cloud_projects',
+  {
+    id: serial('id').primaryKey(),
+    userId: integer('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: text('project_id').notNull(),
+    name: text('name').notNull(),
+    aspectRatio: text('aspect_ratio').notNull().default('16:9'),
+    resolution: text('resolution').notNull().default('1080p'),
+    frameRate: integer('frame_rate').notNull().default(30),
+    mediaCount: integer('media_count').notNull().default(0),
+    thumbnail: text('thumbnail'),
+    snapshotJson: text('snapshot_json').notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('cloud_projects_user_project_idx').on(table.userId, table.projectId),
+  ]
+);
+
 // ── Relations ────────────────────────────
 export const usersRelations = relations(users, ({ many }) => ({
   subscriptions: many(userSubscriptions),
   payments: many(payments),
   tickets: many(supportTickets),
   devices: many(deviceRegistrations),
+  cloudProjects: many(cloudProjects),
+}));
+
+export const cloudProjectsRelations = relations(cloudProjects, ({ one }) => ({
+  user: one(users, {
+    fields: [cloudProjects.userId],
+    references: [users.id],
+  }),
 }));
 
 export const pricingPlansRelations = relations(pricingPlans, ({ many }) => ({

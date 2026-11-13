@@ -313,20 +313,20 @@ Thank you for subscribing with Google Pay!
             <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-6">
               <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
                 <HardDrive className="w-4 h-4 text-zinc-400" />
-                Browser Local Storage & Sync
+                Global Cloud Sync & Local Storage
               </h3>
               <p className="text-xs text-zinc-400 mb-4 leading-relaxed">
-                Projects and video clips are stored safely in your browser database using IndexedDB. You can export complete project zip packages for backup or transfer between computers.
+                Your timeline edits, captions, and project metadata sync automatically across all devices via Cloud Database & Firestore, while high-speed media assets cache locally. Export .autocut.zip archives anytime to bundle raw video files.
               </p>
 
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <div className="bg-zinc-950/60 p-3 rounded-lg border border-zinc-800/60">
-                  <span className="text-zinc-500 block mb-0.5">Local Projects</span>
+                  <span className="text-zinc-500 block mb-0.5">Synced Projects</span>
                   <span className="font-bold text-white text-base">{projectCount}</span>
                 </div>
                 <div className="bg-zinc-950/60 p-3 rounded-lg border border-zinc-800/60">
                   <span className="text-zinc-500 block mb-0.5">Render Engine</span>
-                  <span className="font-bold text-emerald-400 text-base">FFmpeg & Canvas</span>
+                  <span className="font-bold text-emerald-400 text-base">FFmpeg & WebCodecs</span>
                 </div>
               </div>
             </div>

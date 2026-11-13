@@ -22,6 +22,7 @@ import {
   LogIn,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
+import { authFetch } from "../utils/authClient";
 
 interface Ticket {
   id: number;
@@ -79,7 +80,7 @@ export const SupportPage: React.FC = () => {
     if (!currentUser) return;
     setLoadingTickets(true);
     try {
-      const res = await fetch("/api/support/tickets", { credentials: "include" });
+      const res = await authFetch("/api/support/tickets");
       if (res.ok) {
         const data = await res.json();
         setTickets(data.tickets || []);
@@ -101,7 +102,7 @@ export const SupportPage: React.FC = () => {
     setSelectedTicket(ticket);
     setLoadingMessages(true);
     try {
-      const res = await fetch(`/api/support/tickets/${ticket.id}`, { credentials: "include" });
+      const res = await authFetch(`/api/support/tickets/${ticket.id}`);
       if (res.ok) {
         const data = await res.json();
         setMessages(data.messages || []);
@@ -129,10 +130,9 @@ export const SupportPage: React.FC = () => {
     setFormFeedback(null);
 
     try {
-      const res = await fetch("/api/support/tickets", {
+      const res = await authFetch("/api/support/tickets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({
           subject: subject.trim(),
           category,
@@ -169,10 +169,9 @@ export const SupportPage: React.FC = () => {
     setSendingReply(true);
 
     try {
-      const res = await fetch(`/api/support/tickets/${selectedTicket.id}/messages`, {
+      const res = await authFetch(`/api/support/tickets/${selectedTicket.id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({ message: replyText.trim() }),
       });
 

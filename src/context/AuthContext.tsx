@@ -5,6 +5,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { getDeviceFingerprint } from "../utils/fingerprint";
 import { authFetch, setStoredToken, removeStoredToken } from "../utils/authClient";
+import { syncUserProfileToFirestore } from "../utils/firestoreSync";
 
 export interface AuthUser {
   id: number;
@@ -40,7 +41,10 @@ interface AuthContextType {
   loginWithGoogle: (payload: GoogleAuthPayload) => Promise<boolean>;
   register: (name: string, email: string, password: string, verificationCode: string) => Promise<boolean>;
   validateEmailAddress: (email: string) => Promise<{ valid: boolean; exists?: boolean; domain?: string; error?: string }>;
-  sendEmailVerificationCode: (email: string, name?: string) => Promise<{ success: boolean; message?: string; error?: string }>;
+  sendEmailVerificationCode: (
+    email: string,
+    name?: string
+  ) => Promise<{ success: boolean; message?: string; error?: string; desktopMode?: boolean; desktopVerificationCode?: string }>;
   verifyCode: (email: string, code: string) => Promise<{ verified: boolean; error?: string }>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -64,6 +68,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (data.token) {
           setStoredToken(data.token);
         }
+        syncUserProfileToFirestore(data.user).catch(() => {});
       } else {
         setCurrentUser(null);
         if (res.status === 401) {
@@ -127,6 +132,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (data.token) {
           setStoredToken(data.token);
         }
+        syncUserProfileToFirestore(data.user).catch(() => {});
         return true;
       }
       if (data.blocked) {
@@ -204,7 +210,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!res.ok) {
         return { success: false, error: data.error || "Failed to send verification code." };
       }
-      return { success: true, message: data.message };
+      return {
+        success: true,
+        message: data.message,
+        desktopMode: data.desktopMode,
+        desktopVerificationCode: data.desktopVerificationCode,
+      };
     } catch {
       return { success: false, error: "Network error sending verification code." };
     }

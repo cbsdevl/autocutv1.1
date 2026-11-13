@@ -11,6 +11,7 @@ import {
   emailVerifications,
   authAuditLogs,
   loginAttempts,
+  cloudProjects,
 } from './schema.ts';
 
 // ─────────────────────────────────────────
@@ -1082,6 +1083,164 @@ export const getSupportStats = async () => {
     inProgress: Number(inProgressRows[0]?.count || 0),
     resolved: Number(resolvedRows[0]?.count || 0),
   };
+};
+
+// ── Cloud Projects (Global Cross-Device Persistence) ──
+
+export interface DBCloudProjectSummary {
+  id: string;
+  name: string;
+  aspectRatio: string;
+  resolution: string;
+  frameRate: number;
+  mediaCount: number;
+  thumbnail?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DBCloudProject extends DBCloudProjectSummary {
+  userId: number;
+  snapshotJson: string;
+}
+
+export const upsertCloudProject = async (data: {
+  userId: number;
+  projectId: string;
+  name: string;
+  aspectRatio?: string;
+  resolution?: string;
+  frameRate?: number;
+  mediaCount: number;
+  thumbnail?: string | null;
+  snapshotJson: string;
+}): Promise<DBCloudProjectSummary> => {
+  const now = new Date();
+  const existing = await db
+    .select({ id: cloudProjects.id })
+    .from(cloudProjects)
+    .where(and(eq(cloudProjects.userId, data.userId), eq(cloudProjects.projectId, data.projectId)))
+    .limit(1);
+
+  if (existing[0]) {
+    const updated = await db
+      .update(cloudProjects)
+      .set({
+        name: data.name,
+        aspectRatio: data.aspectRatio || '16:9',
+        resolution: data.resolution || '1080p',
+        frameRate: data.frameRate || 30,
+        mediaCount: data.mediaCount || 0,
+        thumbnail: data.thumbnail ?? null,
+        snapshotJson: data.snapshotJson,
+        updatedAt: now,
+      })
+      .where(eq(cloudProjects.id, existing[0].id))
+      .returning();
+
+    const row = updated[0];
+    return {
+      id: row.projectId,
+      name: row.name,
+      aspectRatio: row.aspectRatio,
+      resolution: row.resolution,
+      frameRate: row.frameRate,
+      mediaCount: row.mediaCount,
+      thumbnail: row.thumbnail || undefined,
+      createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : now.toISOString(),
+      updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : now.toISOString(),
+    };
+  }
+
+  const inserted = await db
+    .insert(cloudProjects)
+    .values({
+      userId: data.userId,
+      projectId: data.projectId,
+      name: data.name,
+      aspectRatio: data.aspectRatio || '16:9',
+      resolution: data.resolution || '1080p',
+      frameRate: data.frameRate || 30,
+      mediaCount: data.mediaCount || 0,
+      thumbnail: data.thumbnail ?? null,
+      snapshotJson: data.snapshotJson,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning();
+
+  const row = inserted[0];
+  return {
+    id: row.projectId,
+    name: row.name,
+    aspectRatio: row.aspectRatio,
+    resolution: row.resolution,
+    frameRate: row.frameRate,
+    mediaCount: row.mediaCount,
+    thumbnail: row.thumbnail || undefined,
+    createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : now.toISOString(),
+    updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : now.toISOString(),
+  };
+};
+
+export const listCloudProjectsByUser = async (userId: number): Promise<DBCloudProjectSummary[]> => {
+  const rows = await db
+    .select({
+      projectId: cloudProjects.projectId,
+      name: cloudProjects.name,
+      aspectRatio: cloudProjects.aspectRatio,
+      resolution: cloudProjects.resolution,
+      frameRate: cloudProjects.frameRate,
+      mediaCount: cloudProjects.mediaCount,
+      thumbnail: cloudProjects.thumbnail,
+      createdAt: cloudProjects.createdAt,
+      updatedAt: cloudProjects.updatedAt,
+    })
+    .from(cloudProjects)
+    .where(eq(cloudProjects.userId, userId))
+    .orderBy(desc(cloudProjects.updatedAt));
+
+  return rows.map((row) => ({
+    id: row.projectId,
+    name: row.name,
+    aspectRatio: row.aspectRatio,
+    resolution: row.resolution,
+    frameRate: row.frameRate,
+    mediaCount: row.mediaCount,
+    thumbnail: row.thumbnail || undefined,
+    createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
+    updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : new Date().toISOString(),
+  }));
+};
+
+export const getCloudProjectByUser = async (userId: number, projectId: string): Promise<DBCloudProject | null> => {
+  const rows = await db
+    .select()
+    .from(cloudProjects)
+    .where(and(eq(cloudProjects.userId, userId), eq(cloudProjects.projectId, projectId)))
+    .limit(1);
+
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    id: row.projectId,
+    userId: row.userId,
+    name: row.name,
+    aspectRatio: row.aspectRatio,
+    resolution: row.resolution,
+    frameRate: row.frameRate,
+    mediaCount: row.mediaCount,
+    thumbnail: row.thumbnail || undefined,
+    snapshotJson: row.snapshotJson,
+    createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
+    updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : new Date().toISOString(),
+  };
+};
+
+export const deleteCloudProjectByUser = async (userId: number, projectId: string): Promise<void> => {
+  await db
+    .delete(cloudProjects)
+    .where(and(eq(cloudProjects.userId, userId), eq(cloudProjects.projectId, projectId)));
 };
 
 export default db;

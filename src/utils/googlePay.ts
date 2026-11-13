@@ -2,6 +2,7 @@
  * Google Pay Helper and Utilities for AutoCut AI
  * Formats API requests, initializes client payment configurations, and interacts with backend checkout.
  */
+import { authFetch } from "./authClient";
 
 export interface GooglePayPublicConfig {
   environment: "TEST" | "PRODUCTION";
@@ -125,10 +126,9 @@ export async function submitGooglePayCheckout(params: {
   simulated?: boolean;
 }): Promise<{ ok: boolean; transaction?: GooglePayTransactionResult; error?: string }> {
   try {
-    const res = await fetch("/api/payments/google-pay/checkout", {
+    const res = await authFetch("/api/payments/google-pay/checkout", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "include",
       body: JSON.stringify(params),
     });
 

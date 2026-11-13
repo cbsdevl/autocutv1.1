@@ -6,6 +6,7 @@ import {
   Shield, Trash2, Users, AlertCircle, Crown, ExternalLink,
   LifeBuoy, MessageSquare, Send, Tag, Clock, Plus, X, Lock, Sparkles
 } from "lucide-react";
+import { authFetch } from "../../utils/authClient";
 
 interface AdminUser {
   id: number;
@@ -81,14 +82,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
   };
 
   const loadUsers = useCallback(async () => {
-    const res = await fetch("/api/admin/users", { credentials: "include" });
+    const res = await authFetch("/api/admin/users");
     if (!res.ok) throw new Error(res.status === 403 ? "Admin access required." : "Could not load accounts.");
     const d = await res.json();
     setUsers(d.users || []);
   }, []);
 
   const loadPlans = useCallback(async () => {
-    const res = await fetch("/api/admin/plans", { credentials: "include" });
+    const res = await authFetch("/api/admin/plans");
     if (!res.ok) throw new Error(res.status === 403 ? "Admin access required." : "Could not load plans.");
     const d = await res.json();
     setPlans(d.plans || []);
@@ -96,7 +97,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
 
   const loadPayments = useCallback(async () => {
     try {
-      const res = await fetch("/api/admin/payments", { credentials: "include" });
+      const res = await authFetch("/api/admin/payments");
       if (res.ok) {
         const d = await res.json();
         setPayments(d.payments || []);
@@ -112,7 +113,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
       const url = statusFilter && statusFilter !== "all"
         ? `/api/admin/support/tickets?status=${statusFilter}`
         : `/api/admin/support/tickets`;
-      const res = await fetch(url, { credentials: "include" });
+      const res = await authFetch(url);
       if (res.ok) {
         const d = await res.json();
         setSupportTickets(d.tickets || []);
@@ -127,7 +128,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
     setSelectedAdminTicket(ticket);
     setLoadingTicketThread(true);
     try {
-      const res = await fetch(`/api/support/tickets/${ticket.id}`, { credentials: "include" });
+      const res = await authFetch(`/api/support/tickets/${ticket.id}`);
       if (res.ok) {
         const d = await res.json();
         setAdminTicketMessages(d.messages || []);
@@ -141,10 +142,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
 
   const handleUpdateTicketStatus = async (ticketId: number, status: string, priority?: string) => {
     try {
-      const res = await fetch(`/api/admin/support/tickets/${ticketId}/status`, {
+      const res = await authFetch(`/api/admin/support/tickets/${ticketId}/status`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({ status, priority }),
       });
       if (res.ok) {
@@ -162,10 +162,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
   const handleAdminReply = async () => {
     if (!selectedAdminTicket || !adminReplyText.trim()) return;
     try {
-      const res = await fetch(`/api/support/tickets/${selectedAdminTicket.id}/messages`, {
+      const res = await authFetch(`/api/support/tickets/${selectedAdminTicket.id}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        credentials: "include",
         body: JSON.stringify({ message: adminReplyText.trim() }),
       });
       if (res.ok) {
@@ -190,8 +189,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
   // ── User Actions ──────────────────────────────────────────
 
   const handleRoleChange = async (userId: number, newRole: "user" | "admin") => {
-    const res = await fetch(`/api/admin/users/${userId}`, {
-      method: "PUT", credentials: "include",
+    const res = await authFetch(`/api/admin/users/${userId}`, {
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ role: newRole }),
     });
@@ -200,8 +199,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
   };
 
   const handlePlanChange = async (userId: number, planSlug: string) => {
-    const res = await fetch(`/api/admin/users/${userId}`, {
-      method: "PUT", credentials: "include",
+    const res = await authFetch(`/api/admin/users/${userId}`, {
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ planSlug }),
     });
@@ -210,8 +209,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
   };
 
   const handleDeleteUser = async (userId: number) => {
-    const res = await fetch(`/api/admin/users/${userId}`, {
-      method: "DELETE", credentials: "include",
+    const res = await authFetch(`/api/admin/users/${userId}`, {
+      method: "DELETE",
     });
     if (res.ok) { flash("success", "User deleted."); setConfirmDelete(null); loadUsers(); }
     else flash("error", "Failed to delete user.");
@@ -222,8 +221,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
   const handleSavePlan = async (plan: PlanAdmin) => {
     const edits = planEdits[plan.id] || {};
     try {
-      const res = await fetch(`/api/admin/plans/${plan.id}`, {
-        method: "PUT", credentials: "include",
+      const res = await authFetch(`/api/admin/plans/${plan.id}`, {
+        method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(edits),
       });
@@ -255,9 +254,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
 
     setIsSubmittingPlan(true);
     try {
-      const res = await fetch("/api/admin/plans", {
+      const res = await authFetch("/api/admin/plans", {
         method: "POST",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: newPlanForm.name.trim(),
@@ -298,9 +296,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
   const handleDeletePlan = async (plan: PlanAdmin) => {
     setIsDeletingPlan(true);
     try {
-      const res = await fetch(`/api/admin/plans/${plan.id}`, {
+      const res = await authFetch(`/api/admin/plans/${plan.id}`, {
         method: "DELETE",
-        credentials: "include",
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
